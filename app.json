@@ -9,24 +9,49 @@
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yourname.lostpersonalert",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ],
+        "NSLocationWhenInUseUsageDescription": "This app needs your location to show missing persons in your area and help track them.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app needs background location to continuously track missing persons and alert you when you are near a case.",
+        "NSLocationAlwaysUsageDescription": "This app needs background location to continuously track missing persons and alert you when you are near a case."
+      }
     },
     "android": {
+      "package": "com.yourname.lostpersonalert",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "foregroundImage": "./assets/images/icon.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION"
+      ]
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/favicon.png",
+      "bundler": "metro"
     },
     "plugins": [
       "expo-router",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow Lost Person Alert to use your location to track missing persons in your area and alert you when you are near a case.",
+          "locationAlwaysPermission": "Allow Lost Person Alert to use your location in the background to continuously monitor for missing persons near you.",
+          "locationWhenInUsePermission": "Allow Lost Person Alert to use your location to show missing persons in your area on the map."
+        }
+      ],
       [
         "expo-splash-screen",
         {
@@ -41,8 +66,7 @@
       ]
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     }
   }
 }
