@@ -1,6 +1,6 @@
 import { Config } from "../constants/config";
 
-const CLOUD_NAME = "dmbddu6fk"; // Replace with your actual cloud name
+const CLOUD_NAME = "xxxxxx"; // Replace with your actual cloud name
 const UPLOAD_PRESET = Config.cloudinary.uploadPreset;
 const UPLOAD_URL = `https://api.cloudinary.com/v1_1/${CLOUD_NAME}/image/upload`;
 
