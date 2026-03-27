@@ -11,12 +11,9 @@ import { db, auth } from "../src/firebase/firebaseConfig";
 import { uploadImageToCloudinary } from "../src/services/cloudinaryService";
 import { validateAge } from "../src/utils/validators";
 import { SafeAreaView } from "react-native-safe-area-context";
-// Metro automatically picks:
-//   LocationPicker.native.tsx  on Android/iOS
-//   LocationPicker.web.tsx     on web
-// Do NOT add .native here — that bypasses platform resolution
 import LocationPicker from "../src/components/LocationPicker.native";
 import type { LocationResult } from "../src/components/LocationPicker.native";
+import DateTimePicker, { formatDateTime } from "../src/components/DateTimePicker";
 
 // ── Palette ───────────────────────────────────────────────────────────────────
 
@@ -153,7 +150,7 @@ export default function ReportMissingScreen() {
   const [clothingDescription, setClothingDescription] = useState("");
   const [lastSeenLocation, setLastSeenLocation]       = useState("");
   const [lastSeenCoords, setLastSeenCoords]           = useState<{ latitude: number; longitude: number } | null>(null);
-  const [lastSeenDate, setLastSeenDate]               = useState("");
+  const [lastSeenDate, setLastSeenDate]               = useState<Date | null>(null); // ← now a Date object
   const [contactName, setContactName]                 = useState("");
   const [contactPhone, setContactPhone]               = useState("");
   const [isUrgentFlag, setIsUrgentFlag]               = useState(false);
@@ -180,7 +177,7 @@ export default function ReportMissingScreen() {
     }
     if (step === 3) {
       if (!lastSeenLocation.trim()) errs.lastSeenLocation = "Location is required";
-      if (!lastSeenDate.trim())     errs.lastSeenDate     = "Date is required";
+      if (!lastSeenDate)            errs.lastSeenDate     = "Please select the date and time";
       if (!contactPhone.trim())     errs.contactPhone     = "Contact phone is required";
     }
     setErrors(errs);
@@ -194,8 +191,16 @@ export default function ReportMissingScreen() {
     try {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== "granted") { Alert.alert("Permission required", "Please allow access to your photo library."); return; }
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, aspect: [3, 4], quality: 0.85 });
-      if (!result.canceled) setImageUri(result.assets[0].uri);
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [3, 4],
+        quality: 0.85,
+        allowsMultipleSelection: false,
+        selectionLimit: 1,
+        base64: false,
+      });
+      if (!result.canceled && result.assets.length > 0) setImageUri(result.assets[0].uri);
     } catch { Alert.alert("Error", "Failed to pick image."); }
   };
 
@@ -209,12 +214,18 @@ export default function ReportMissingScreen() {
   };
 
   const proceedWithSubmission = async (photoUrl: string) => {
+    // Format the date as a readable string for storage
+    const lastSeenDateStr = lastSeenDate ? formatDateTime(lastSeenDate) : "";
+
     await addDoc(collection(db, "missingPersons"), {
       name: name.trim(), age: parseInt(age) || 0, gender,
       height: height.trim() || null, complexion: complexion || null,
       description: description.trim() || null,
       clothingDescription: clothingDescription.trim() || null,
-      lastSeenLocation: lastSeenLocation.trim(), lastSeenDate: lastSeenDate.trim(),
+      lastSeenLocation: lastSeenLocation.trim(),
+      lastSeenDate: lastSeenDateStr,
+      // Also store as timestamp for sorting/filtering
+      lastSeenTimestamp: lastSeenDate ?? null,
       contactName: contactName.trim() || null, contactPhone: contactPhone.trim(),
       photoUrl: photoUrl || null, status: "active",
       coordinates:  lastSeenCoords || null,
@@ -259,15 +270,12 @@ export default function ReportMissingScreen() {
     } finally { setLoading(false); setUploading(false); }
   };
 
-  // Fully typed — no implicit any
   const handleLocationConfirm = (result: LocationResult) => {
     setLastSeenLocation(result.address);
     if (result.lat !== 0 || result.lng !== 0) {
       setLastSeenCoords({ latitude: result.lat, longitude: result.lng });
     }
   };
-
-  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <SafeAreaView style={styles.root} edges={["top", "left", "right"]}>
@@ -346,8 +354,25 @@ export default function ReportMissingScreen() {
                 )}
               </Field>
 
-              <Field label="Date & Time Last Seen" required error={errors.lastSeenDate} hint="Be as specific as possible">
-                <TextInput style={input} value={lastSeenDate} onChangeText={setLastSeenDate} placeholder="e.g. 15 Jan 2025, 3:00 PM" placeholderTextColor={G.muted} />
+              {/* ── Date & Time Picker ── */}
+              <Field
+                label="Date & Time Last Seen"
+                required
+                error={errors.lastSeenDate}
+                hint="Tap to open the date and time picker"
+              >
+                <DateTimePicker
+                  value={lastSeenDate}
+                  onChange={(date) => {
+                    setLastSeenDate(date);
+                    setErrors((e) => ({ ...e, lastSeenDate: "" }));
+                  }}
+                  placeholder="Tap to select date and time"
+                  primaryColor={G.primary}
+                  borderColor={errors.lastSeenDate ? G.error : G.inputBdr}
+                  textColor={G.text}
+                  backgroundColor={G.white}
+                />
               </Field>
 
               <View style={styles.sectionBreak}>
@@ -363,7 +388,7 @@ export default function ReportMissingScreen() {
                 <TextInput style={input} value={contactPhone} onChangeText={setContactPhone} placeholder="+91 XXXXX XXXXX" placeholderTextColor={G.muted} keyboardType="phone-pad" />
               </Field>
 
-              {/* ── Urgent flag ── */}
+              {/* Urgent flag */}
               <View style={styles.urgentToggleWrap}>
                 <View style={{ flex: 1 }}>
                   <Text style={styles.urgentToggleLabel}>🚨 Mark as Urgent</Text>
@@ -431,12 +456,12 @@ export default function ReportMissingScreen() {
                 <Text style={styles.summaryHeader}>📋 Review Before Submitting</Text>
                 <View style={styles.summaryDivider} />
                 {[
-                  { key: "Name",         val: name             || "—" },
+                  { key: "Name",         val: name || "—" },
                   { key: "Age / Gender", val: age ? `${age} yrs · ${gender}` : "—" },
                   { key: "Height",       val: height ? `${height} cm` : "Not provided" },
                   { key: "Last Seen",    val: lastSeenLocation || "—" },
-                  { key: "Date",         val: lastSeenDate     || "—" },
-                  { key: "Contact",      val: contactPhone     || "—" },
+                  { key: "Date & Time",  val: lastSeenDate ? formatDateTime(lastSeenDate) : "—" },
+                  { key: "Contact",      val: contactPhone || "—" },
                   { key: "Coordinates",  val: lastSeenCoords ? `${lastSeenCoords.latitude.toFixed(4)}, ${lastSeenCoords.longitude.toFixed(4)}` : "Not pinned" },
                 ].map(({ key, val }) => (
                   <View key={key} style={styles.summaryRow}>
@@ -487,17 +512,17 @@ const styles = StyleSheet.create({
   card:   { backgroundColor: G.white, borderRadius: 16, padding: 20, borderWidth: 1, borderColor: "#EEEEEE", shadowColor: "#000", shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 3 },
   row2:   { flexDirection: "row", gap: 12 },
 
-  coordsNote:        { fontSize: 11, color: G.dark, marginTop: 6, fontStyle: "italic" },
-  // Urgent toggle
-  urgentToggleWrap:       { flexDirection: "row", alignItems: "center", backgroundColor: "#FFF8F8", borderRadius: 12, padding: 14, borderWidth: 1.5, borderColor: "#FADADD", marginBottom: 10, gap: 12 },
-  urgentToggleLabel:      { fontSize: 14, fontWeight: "700", color: "#C0392B" },
-  urgentToggleSub:        { fontSize: 11, color: "#E74C3C", marginTop: 2 },
-  urgentToggleBtn:        { width: 50, height: 28, borderRadius: 14, backgroundColor: "#DDDDDD", justifyContent: "center", paddingHorizontal: 3 },
-  urgentToggleBtnActive:  { backgroundColor: "#E74C3C" },
-  urgentToggleThumb:      { width: 22, height: 22, borderRadius: 11, backgroundColor: "#fff", shadowColor: "#000", shadowOpacity: 0.2, shadowRadius: 2, elevation: 2 },
-  urgentToggleThumbActive:{ transform: [{ translateX: 22 }] },
-  urgentNote:             { backgroundColor: "#FDECEA", borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: "#E74C3C" },
-  urgentNoteText:         { fontSize: 12, color: "#C0392B", fontWeight: "600" },
+  coordsNote: { fontSize: 11, color: G.dark, marginTop: 6, fontStyle: "italic" },
+
+  urgentToggleWrap:        { flexDirection: "row", alignItems: "center", backgroundColor: "#FFF8F8", borderRadius: 12, padding: 14, borderWidth: 1.5, borderColor: "#FADADD", marginBottom: 10, gap: 12 },
+  urgentToggleLabel:       { fontSize: 14, fontWeight: "700", color: "#C0392B" },
+  urgentToggleSub:         { fontSize: 11, color: "#E74C3C", marginTop: 2 },
+  urgentToggleBtn:         { width: 50, height: 28, borderRadius: 14, backgroundColor: "#DDDDDD", justifyContent: "center", paddingHorizontal: 3 },
+  urgentToggleBtnActive:   { backgroundColor: "#E74C3C" },
+  urgentToggleThumb:       { width: 22, height: 22, borderRadius: 11, backgroundColor: "#fff", shadowColor: "#000", shadowOpacity: 0.2, shadowRadius: 2, elevation: 2 },
+  urgentToggleThumbActive: { transform: [{ translateX: 22 }] },
+  urgentNote:              { backgroundColor: "#FDECEA", borderRadius: 8, padding: 10, marginBottom: 8, borderWidth: 1, borderColor: "#E74C3C" },
+  urgentNoteText:          { fontSize: 12, color: "#C0392B", fontWeight: "600" },
 
   sectionBreak:      { flexDirection: "row", alignItems: "center", gap: 10, marginVertical: 20 },
   sectionBreakLine:  { flex: 1, height: 1, backgroundColor: "#EEEEEE" },

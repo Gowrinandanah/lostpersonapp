@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Image,
   TouchableOpacity, ActivityIndicator, Alert,
-  RefreshControl, useColorScheme, FlatList, Modal,
+  RefreshControl, useColorScheme, Modal,
 } from "react-native";
 import { router, Stack, useFocusEffect } from "expo-router";
 import {
@@ -46,6 +46,14 @@ interface Sighting {
   verified: boolean;
   createdAt: Timestamp | null;
   flagged?: boolean;
+  // Face match fields
+  faceMatchScore?: number;
+  faceMatchLabel?: "high" | "medium" | "low";
+  faceMatchColor?: string;
+  isSamePerson?: boolean;
+  faceMatchAttempted?: boolean;
+  faceMatchError?: string | null;
+  coordinates?: { latitude: number; longitude: number } | null;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -54,10 +62,16 @@ function timeAgo(ts: Timestamp | null): string {
   if (!ts) return "Unknown";
   const d = ts instanceof Timestamp ? ts.toDate() : new Date(ts as any);
   const diff = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (diff < 60)   return "Just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400)return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 60)    return "Just now";
+  if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function formatDate(ts: Timestamp | null): string {
+  if (!ts) return "Unknown";
+  const d = ts instanceof Timestamp ? ts.toDate() : new Date(ts as any);
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 const CONFIDENCE_LABEL: Record<string, { label: string; color: string; icon: string }> = {
@@ -66,16 +80,286 @@ const CONFIDENCE_LABEL: Record<string, { label: string; color: string; icon: str
   high:   { label: "Very Sure",   color: "#27AE60", icon: "✅" },
 };
 
-// ── Sighting Card ─────────────────────────────────────────────────────────────
+// ── Face Match Badge ──────────────────────────────────────────────────────────
+// Shown prominently on each sighting card
+
+const FaceMatchBadge = ({ sighting, large = false }: { sighting: Sighting; large?: boolean }) => {
+  if (!sighting.faceMatchAttempted) return null;
+
+  if (sighting.faceMatchError || !sighting.faceMatchScore) {
+    return (
+      <View style={[fmbS.badge, { backgroundColor: "#F5F5F5", borderColor: "#DDDDDD" }]}>
+        <Text style={fmbS.icon}>📷</Text>
+        <Text style={[fmbS.text, { color: "#888888" }]}>No face data</Text>
+      </View>
+    );
+  }
+
+  const score = sighting.faceMatchScore;
+  const color = sighting.faceMatchColor || "#888";
+  const label =
+    sighting.faceMatchLabel === "high"   ? "High match" :
+    sighting.faceMatchLabel === "medium" ? "Possible match" : "Low match";
+
+  return (
+    <View style={[
+      fmbS.badge,
+      { backgroundColor: color + "18", borderColor: color },
+      large && fmbS.badgeLarge,
+    ]}>
+      <Text style={[fmbS.score, { color }, large && fmbS.scoreLarge]}>
+        {score.toFixed(0)}%
+      </Text>
+      <Text style={[fmbS.text, { color }, large && fmbS.textLarge]}>
+        {label}
+      </Text>
+      {sighting.isSamePerson && (
+        <View style={[fmbS.matchDot, { backgroundColor: color }]} />
+      )}
+    </View>
+  );
+};
+
+const fmbS = StyleSheet.create({
+  badge:      { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10, borderWidth: 1.5 },
+  badgeLarge: { paddingHorizontal: 16, paddingVertical: 10, borderRadius: 14, gap: 8 },
+  icon:       { fontSize: 12 },
+  score:      { fontSize: 13, fontWeight: "900" },
+  scoreLarge: { fontSize: 22, fontWeight: "900" },
+  text:       { fontSize: 11, fontWeight: "700" },
+  textLarge:  { fontSize: 14, fontWeight: "700" },
+  matchDot:   { width: 7, height: 7, borderRadius: 4, marginLeft: 2 },
+});
+
+// ── Sighting Detail Modal ─────────────────────────────────────────────────────
+// Full details when user taps a sighting card
+
+const SightingDetailModal = ({
+  visible, sighting, theme, onClose,
+}: {
+  visible: boolean;
+  sighting: Sighting | null;
+  theme: ColorScheme;
+  onClose: () => void;
+}) => {
+  if (!sighting) return null;
+
+  const conf  = CONFIDENCE_LABEL[sighting.confidence] ?? CONFIDENCE_LABEL.medium;
+  const score = sighting.faceMatchScore ?? 0;
+  const color = sighting.faceMatchColor ?? "#888";
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={[sdS.root, { backgroundColor: theme.background }]}>
+
+        {/* Header */}
+        <View style={[sdS.header, { backgroundColor: theme.card, borderBottomColor: theme.border }]}>
+          <TouchableOpacity onPress={onClose} style={sdS.closeBtn}>
+            <Text style={{ fontSize: 16, fontWeight: "700", color: theme.textSecondary }}>✕</Text>
+          </TouchableOpacity>
+          <Text style={[sdS.headerTitle, { color: theme.text }]}>Sighting Details</Text>
+          <View style={{ width: 40 }} />
+        </View>
+
+        <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+
+          {/* ── Face Match Score — most important, shown first ── */}
+          <View style={[sdS.faceCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <Text style={[sdS.sectionLabel, { color: theme.textSecondary }]}>🔍 FACE COMPARISON RESULT</Text>
+
+            {sighting.faceMatchAttempted && !sighting.faceMatchError && score > 0 ? (
+              <>
+                {/* Big score circle */}
+                <View style={[sdS.scoreCircle, { borderColor: color }]}>
+                  <Text style={[sdS.scoreNumber, { color }]}>{score.toFixed(0)}%</Text>
+                  <Text style={[sdS.scoreWord, { color }]}>match</Text>
+                </View>
+
+                {/* Label */}
+                <View style={[sdS.scoreLabelBadge, { backgroundColor: color + "18", borderColor: color }]}>
+                  <Text style={[sdS.scoreLabelText, { color }]}>
+                    {sighting.faceMatchLabel === "high"   ? "High Match"      :
+                     sighting.faceMatchLabel === "medium" ? "Possible Match"  : "Low Match"}
+                  </Text>
+                </View>
+
+                {/* Interpretation */}
+                <Text style={[sdS.scoreInterpret, { color: theme.textSecondary }]}>
+                  {sighting.isSamePerson
+                    ? "⚠️ High probability this is the missing person. "
+                    : score >= 60
+                    ? "🔍 Moderate similarity detected. Worth investigating further."
+                    : "ℹ️ Low facial similarity. May not be the same person."}
+                </Text>
+              </>
+            ) : (
+              <View style={sdS.noFaceWrap}>
+                <Text style={{ fontSize: 28, marginBottom: 6 }}>📷</Text>
+                <Text style={[sdS.noFaceText, { color: theme.textSecondary }]}>
+                  {sighting.faceMatchError ?? "No photo was attached — face comparison was skipped."}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* ── Sighting Photo ── */}
+          {sighting.photoUrl ? (
+            <View style={[sdS.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+              <Text style={[sdS.sectionLabel, { color: theme.textSecondary }]}>📷 SIGHTING PHOTO</Text>
+              <Image source={{ uri: sighting.photoUrl }} style={sdS.photo} resizeMode="cover" />
+            </View>
+          ) : null}
+
+          {/* ── Location & Time ── */}
+          <View style={[sdS.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <Text style={[sdS.sectionLabel, { color: theme.textSecondary }]}>📍 LOCATION & TIME</Text>
+            <View style={sdS.detailRow}>
+              <Text style={sdS.detailIcon}>📍</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[sdS.detailLabel, { color: theme.textSecondary }]}>Where</Text>
+                <Text style={[sdS.detailValue, { color: theme.text }]}>{sighting.sightingLocation}</Text>
+              </View>
+            </View>
+            <View style={sdS.detailRow}>
+              <Text style={sdS.detailIcon}>🕐</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[sdS.detailLabel, { color: theme.textSecondary }]}>When</Text>
+                <Text style={[sdS.detailValue, { color: theme.text }]}>{sighting.sightingDate}</Text>
+              </View>
+            </View>
+            {sighting.coordinates && (
+              <View style={sdS.detailRow}>
+                <Text style={sdS.detailIcon}>🛰</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[sdS.detailLabel, { color: theme.textSecondary }]}>GPS Coordinates</Text>
+                  <Text style={[sdS.detailValue, { color: theme.text }]}>
+                    {sighting.coordinates.latitude.toFixed(5)}, {sighting.coordinates.longitude.toFixed(5)}
+                  </Text>
+                </View>
+              </View>
+            )}
+          </View>
+
+          {/* ── Description ── */}
+          <View style={[sdS.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <Text style={[sdS.sectionLabel, { color: theme.textSecondary }]}>📝 DESCRIPTION</Text>
+            <Text style={[sdS.description, { color: theme.text }]}>{sighting.description}</Text>
+          </View>
+
+          {/* ── Reporter Info ── */}
+          <View style={[sdS.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <Text style={[sdS.sectionLabel, { color: theme.textSecondary }]}>👤 REPORTER</Text>
+            <View style={sdS.detailRow}>
+              <Text style={sdS.detailIcon}>👤</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[sdS.detailLabel, { color: theme.textSecondary }]}>Reported By</Text>
+                <Text style={[sdS.detailValue, { color: theme.text }]}>{sighting.reportedByName || "Anonymous"}</Text>
+              </View>
+            </View>
+            <View style={sdS.detailRow}>
+              <Text style={sdS.detailIcon}>📅</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[sdS.detailLabel, { color: theme.textSecondary }]}>Submitted</Text>
+                <Text style={[sdS.detailValue, { color: theme.text }]}>{formatDate(sighting.createdAt)}</Text>
+              </View>
+            </View>
+            {sighting.contactPhone ? (
+              <View style={sdS.detailRow}>
+                <Text style={sdS.detailIcon}>📞</Text>
+                <View style={{ flex: 1 }}>
+                  <Text style={[sdS.detailLabel, { color: theme.textSecondary }]}>Contact</Text>
+                  <Text style={[sdS.detailValue, { color: theme.text }]}>{sighting.contactPhone}</Text>
+                </View>
+              </View>
+            ) : null}
+            {/* Confidence */}
+            <View style={[sdS.detailRow, { borderBottomWidth: 0 }]}>
+              <Text style={sdS.detailIcon}>{conf.icon}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[sdS.detailLabel, { color: theme.textSecondary }]}>Reporter Confidence</Text>
+                <Text style={[sdS.detailValue, { color: conf.color }]}>{conf.label}</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* ── Status ── */}
+          <View style={[sdS.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <Text style={[sdS.sectionLabel, { color: theme.textSecondary }]}>🔖 STATUS</Text>
+            <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+              {sighting.verified && (
+                <View style={[sdS.statusPill, { backgroundColor: "#EAFAF1", borderColor: "#27AE60" }]}>
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: "#27AE60" }}>✓ Verified</Text>
+                </View>
+              )}
+              {sighting.flagged && (
+                <View style={[sdS.statusPill, { backgroundColor: "#FFF3CD", borderColor: "#F39C12" }]}>
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: "#F39C12" }}>⚑ Flagged for review</Text>
+                </View>
+              )}
+              {!sighting.verified && !sighting.flagged && (
+                <View style={[sdS.statusPill, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+                  <Text style={{ fontSize: 11, fontWeight: "700", color: theme.textSecondary }}>⏳ Pending review</Text>
+                </View>
+              )}
+            </View>
+          </View>
+
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+};
+
+const sdS = StyleSheet.create({
+  root:        { flex: 1 },
+  header:      { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1 },
+  closeBtn:    { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
+  headerTitle: { flex: 1, fontSize: 16, fontWeight: "800", textAlign: "center" },
+
+  card:         { borderRadius: 14, padding: 16, marginBottom: 14, borderWidth: 1 },
+  faceCard:     { borderRadius: 14, padding: 16, marginBottom: 14, borderWidth: 1, alignItems: "center" },
+  sectionLabel: { fontSize: 11, fontWeight: "800", letterSpacing: 1, marginBottom: 14, alignSelf: "flex-start" },
+
+  scoreCircle:     { width: 110, height: 110, borderRadius: 55, borderWidth: 5, alignItems: "center", justifyContent: "center", marginBottom: 14 },
+  scoreNumber:     { fontSize: 32, fontWeight: "900" },
+  scoreWord:       { fontSize: 12, fontWeight: "600" },
+  scoreLabelBadge: { paddingHorizontal: 16, paddingVertical: 7, borderRadius: 20, borderWidth: 1.5, marginBottom: 12 },
+  scoreLabelText:  { fontSize: 14, fontWeight: "700" },
+  scoreInterpret:  { fontSize: 13, textAlign: "center", lineHeight: 19, paddingHorizontal: 8 },
+
+  noFaceWrap: { alignItems: "center", paddingVertical: 8 },
+  noFaceText: { fontSize: 13, textAlign: "center", lineHeight: 18 },
+
+  photo: { width: "100%", height: 200, borderRadius: 10 },
+
+  detailRow:   { flexDirection: "row", alignItems: "flex-start", gap: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "rgba(0,0,0,0.06)" },
+  detailIcon:  { fontSize: 18, width: 26, marginTop: 1 },
+  detailLabel: { fontSize: 11, fontWeight: "600", marginBottom: 2 },
+  detailValue: { fontSize: 14, fontWeight: "500", lineHeight: 20 },
+
+  description: { fontSize: 14, lineHeight: 21 },
+
+  statusPill: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10, borderWidth: 1 },
+});
+
+// ── Sighting Card (shown in the list) ────────────────────────────────────────
 
 const SightingCard = ({
-  item, theme, onReport,
+  item, theme, onPress, onReport,
 }: {
-  item: Sighting; theme: ColorScheme; onReport: (s: Sighting) => void;
+  item: Sighting;
+  theme: ColorScheme;
+  onPress: () => void;
+  onReport: (s: Sighting) => void;
 }) => {
   const conf = CONFIDENCE_LABEL[item.confidence] ?? CONFIDENCE_LABEL.medium;
+
   return (
-    <View style={[sightS.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+    <TouchableOpacity
+      style={[sightS.card, { backgroundColor: theme.surface, borderColor: theme.border }]}
+      onPress={onPress}
+      activeOpacity={0.85}
+    >
       {/* Header row */}
       <View style={sightS.header}>
         <View style={[sightS.avatarCircle, { backgroundColor: theme.border }]}>
@@ -96,9 +380,22 @@ const SightingCard = ({
         </View>
       </View>
 
+      {/* ── Face Match Score — prominent ── */}
+      {item.faceMatchAttempted && (
+        <View style={sightS.faceMatchRow}>
+          <FaceMatchBadge sighting={item} />
+          {item.isSamePerson && (
+            <View style={sightS.alertBadge}>
+              <Text style={sightS.alertBadgeText}>⚠️ Likely Match!</Text>
+            </View>
+          )}
+          <Text style={[sightS.tapHint, { color: theme.textSecondary }]}>Tap for details →</Text>
+        </View>
+      )}
+
       {/* Location + date */}
       <View style={sightS.metaRow}>
-        <Text style={[sightS.metaItem, { color: theme.textSecondary }]}>
+        <Text style={[sightS.metaItem, { color: theme.textSecondary }]} numberOfLines={1}>
           📍 {item.sightingLocation}
         </Text>
         <Text style={[sightS.metaItem, { color: theme.textSecondary }]}>
@@ -106,10 +403,12 @@ const SightingCard = ({
         </Text>
       </View>
 
-      {/* Description */}
-      <Text style={[sightS.desc, { color: theme.text }]}>{item.description}</Text>
+      {/* Description preview */}
+      <Text style={[sightS.desc, { color: theme.text }]} numberOfLines={2}>
+        {item.description}
+      </Text>
 
-      {/* Photo if any */}
+      {/* Photo thumbnail if any */}
       {item.photoUrl ? (
         <Image source={{ uri: item.photoUrl }} style={sightS.photo} resizeMode="cover" />
       ) : null}
@@ -127,7 +426,6 @@ const SightingCard = ({
           </View>
         )}
         <View style={{ flex: 1 }} />
-        {/* Report malicious sighting button */}
         {!item.flagged && (
           <TouchableOpacity
             style={[sightS.reportBtn, { borderColor: theme.error ?? "#E74C3C" }]}
@@ -140,23 +438,27 @@ const SightingCard = ({
           </TouchableOpacity>
         )}
       </View>
-    </View>
+    </TouchableOpacity>
   );
 };
 
 const sightS = StyleSheet.create({
-  card:        { borderRadius: 14, padding: 14, marginBottom: 12, borderWidth: 1 },
-  header:      { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 10 },
-  avatarCircle:{ width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
-  reporter:    { fontSize: 13, fontWeight: "700" },
-  time:        { fontSize: 11, marginTop: 1 },
-  confBadge:   { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10, borderWidth: 1 },
-  confText:    { fontSize: 11, fontWeight: "700" },
-  metaRow:     { gap: 4, marginBottom: 8 },
-  metaItem:    { fontSize: 12 },
-  desc:        { fontSize: 14, lineHeight: 20, marginBottom: 10 },
-  photo:       { width: "100%", height: 140, borderRadius: 10, marginBottom: 10 },
-  footer:      { flexDirection: "row", alignItems: "center", gap: 8 },
+  card:         { borderRadius: 14, padding: 14, marginBottom: 12, borderWidth: 1 },
+  header:       { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 10 },
+  avatarCircle: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center" },
+  reporter:     { fontSize: 13, fontWeight: "700" },
+  time:         { fontSize: 11, marginTop: 1 },
+  confBadge:    { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10, borderWidth: 1 },
+  confText:     { fontSize: 11, fontWeight: "700" },
+  faceMatchRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" },
+  alertBadge:   { backgroundColor: "#FDECEA", borderRadius: 8, paddingHorizontal: 8, paddingVertical: 4, borderWidth: 1, borderColor: "#E74C3C" },
+  alertBadgeText:{ fontSize: 11, fontWeight: "800", color: "#E74C3C" },
+  tapHint:      { fontSize: 11, marginLeft: "auto" as any },
+  metaRow:      { gap: 4, marginBottom: 8 },
+  metaItem:     { fontSize: 12 },
+  desc:         { fontSize: 14, lineHeight: 20, marginBottom: 10 },
+  photo:        { width: "100%", height: 120, borderRadius: 10, marginBottom: 10 },
+  footer:       { flexDirection: "row", alignItems: "center", gap: 8 },
   verifiedBadge:{ backgroundColor: "#EAFAF1", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: "#27AE60" },
   verifiedText: { fontSize: 11, fontWeight: "700", color: "#27AE60" },
   flaggedBadge: { backgroundColor: "#FFF3CD", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: "#F39C12" },
@@ -172,11 +474,11 @@ const CaseCard = ({
 }: {
   item: MissingCase; theme: ColorScheme; onPress: () => void;
 }) => {
-  const days    = item.createdAt
+  const days     = item.createdAt
     ? Math.floor((Date.now() - (item.createdAt instanceof Timestamp ? item.createdAt.toDate() : new Date(item.createdAt as any)).getTime()) / 86400000)
     : 0;
-  const urgent  = item.isUrgentFlag || item.isVulnerable || item.age < 18 || item.age > 65;
-  const resolved= item.status === "found" || item.status === "resolved";
+  const urgent   = item.isUrgentFlag || item.isVulnerable || item.age < 18 || item.age > 65;
+  const resolved = item.status === "found" || item.status === "resolved";
 
   return (
     <TouchableOpacity
@@ -194,9 +496,7 @@ const CaseCard = ({
       <View style={{ flex: 1 }}>
         <View style={caseS.nameRow}>
           <Text style={[caseS.name, { color: theme.text }]} numberOfLines={1}>{item.name}</Text>
-          {urgent && !resolved && (
-            <View style={caseS.urgentDot} />
-          )}
+          {urgent && !resolved && <View style={caseS.urgentDot} />}
         </View>
         <Text style={[caseS.meta, { color: theme.textSecondary }]}>
           {item.age} yrs · {item.gender}
@@ -223,19 +523,19 @@ const CaseCard = ({
 };
 
 const caseS = StyleSheet.create({
-  card:           { flexDirection: "row", alignItems: "center", borderRadius: 14, padding: 12, marginBottom: 10, borderWidth: 1.5, gap: 12 },
-  photo:          { width: 60, height: 72, borderRadius: 10 },
+  card:            { flexDirection: "row", alignItems: "center", borderRadius: 14, padding: 12, marginBottom: 10, borderWidth: 1.5, gap: 12 },
+  photo:           { width: 60, height: 72, borderRadius: 10 },
   photoPlaceholder:{ width: 60, height: 72, borderRadius: 10, alignItems: "center", justifyContent: "center" },
-  nameRow:        { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 2 },
-  name:           { fontSize: 15, fontWeight: "700", flex: 1 },
-  urgentDot:      { width: 8, height: 8, borderRadius: 4, backgroundColor: "#E74C3C" },
-  meta:           { fontSize: 12, marginBottom: 2 },
-  location:       { fontSize: 12, marginBottom: 6 },
-  statsRow:       { flexDirection: "row", gap: 6 },
-  statusPill:     { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
-  statusText:     { fontSize: 11, fontWeight: "700" },
-  sightingsPill:  { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, backgroundColor: "#EBF5FB" },
-  sightingsText:  { fontSize: 11, fontWeight: "700", color: "#2980B9" },
+  nameRow:         { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 2 },
+  name:            { fontSize: 15, fontWeight: "700", flex: 1 },
+  urgentDot:       { width: 8, height: 8, borderRadius: 4, backgroundColor: "#E74C3C" },
+  meta:            { fontSize: 12, marginBottom: 2 },
+  location:        { fontSize: 12, marginBottom: 6 },
+  statsRow:        { flexDirection: "row", gap: 6 },
+  statusPill:      { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+  statusText:      { fontSize: 11, fontWeight: "700" },
+  sightingsPill:   { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8, backgroundColor: "#EBF5FB" },
+  sightingsText:   { fontSize: 11, fontWeight: "700", color: "#2980B9" },
 });
 
 // ── Report Malicious Sighting Modal ───────────────────────────────────────────
@@ -299,19 +599,19 @@ const ReportModal = ({
 };
 
 const modalS = StyleSheet.create({
-  overlay:    { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  sheet:      { borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 24, paddingBottom: 40 },
-  title:      { fontSize: 18, fontWeight: "800", marginBottom: 6 },
-  sub:        { fontSize: 13, marginBottom: 16, lineHeight: 18 },
-  reasonRow:  { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 10, borderWidth: 1.5, marginBottom: 8 },
-  radio:      { width: 20, height: 20, borderRadius: 10, borderWidth: 2, alignItems: "center", justifyContent: "center" },
-  radioFill:  { width: 10, height: 10, borderRadius: 5, backgroundColor: "#E74C3C" },
-  reasonText: { fontSize: 14, flex: 1 },
-  btnRow:     { flexDirection: "row", gap: 12, marginTop: 8 },
-  cancelBtn:  { flex: 1, height: 48, borderRadius: 12, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
-  cancelText: { fontWeight: "700" },
-  submitBtn:  { flex: 1, height: 48, borderRadius: 12, backgroundColor: "#E74C3C", alignItems: "center", justifyContent: "center" },
-  submitText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  overlay:   { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
+  sheet:     { borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 24, paddingBottom: 40 },
+  title:     { fontSize: 18, fontWeight: "800", marginBottom: 6 },
+  sub:       { fontSize: 13, marginBottom: 16, lineHeight: 18 },
+  reasonRow: { flexDirection: "row", alignItems: "center", gap: 12, padding: 12, borderRadius: 10, borderWidth: 1.5, marginBottom: 8 },
+  radio:     { width: 20, height: 20, borderRadius: 10, borderWidth: 2, alignItems: "center", justifyContent: "center" },
+  radioFill: { width: 10, height: 10, borderRadius: 5, backgroundColor: "#E74C3C" },
+  reasonText:{ fontSize: 14, flex: 1 },
+  btnRow:    { flexDirection: "row", gap: 12, marginTop: 8 },
+  cancelBtn: { flex: 1, height: 48, borderRadius: 12, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
+  cancelText:{ fontWeight: "700" },
+  submitBtn: { flex: 1, height: 48, borderRadius: 12, backgroundColor: "#E74C3C", alignItems: "center", justifyContent: "center" },
+  submitText:{ color: "#fff", fontWeight: "800", fontSize: 15 },
 });
 
 // ── My Case Detail Modal ──────────────────────────────────────────────────────
@@ -324,11 +624,13 @@ const MyCaseDetailModal = ({
   theme: ColorScheme;
   onClose: () => void;
 }) => {
-  const [sightings,       setSightings]       = useState<Sighting[]>([]);
+  const [sightings,        setSightings]        = useState<Sighting[]>([]);
   const [loadingSightings, setLoadingSightings] = useState(false);
-  const [reportTarget,    setReportTarget]    = useState<Sighting | null>(null);
-  const [reportModal,     setReportModal]     = useState(false);
+  const [reportTarget,     setReportTarget]     = useState<Sighting | null>(null);
+  const [reportModal,      setReportModal]      = useState(false);
   const [submittingReport, setSubmittingReport] = useState(false);
+  const [selectedSighting, setSelectedSighting] = useState<Sighting | null>(null);
+  const [sightingDetail,   setSightingDetail]   = useState(false);
 
   useEffect(() => {
     if (!caseItem) return;
@@ -358,7 +660,6 @@ const MyCaseDetailModal = ({
         createdAt: serverTimestamp(),
         status: "pending",
       });
-      // Mark sighting as flagged locally
       setSightings((prev) =>
         prev.map((s) => s.id === reportTarget.id ? { ...s, flagged: true } : s)
       );
@@ -366,7 +667,7 @@ const MyCaseDetailModal = ({
       setReportTarget(null);
       Alert.alert(
         "Report Submitted",
-        "Thank you. This sighting has been flagged for admin review. The reporter may face consequences if found guilty of spreading false information.",
+        "Thank you. This sighting has been flagged for admin review.",
         [{ text: "OK" }]
       );
     } catch (e) {
@@ -377,6 +678,11 @@ const MyCaseDetailModal = ({
   };
 
   const resolved = caseItem?.status === "found" || caseItem?.status === "resolved";
+
+  // Sort: highest face match score first
+  const sortedSightings = [...sightings].sort((a, b) =>
+    (b.faceMatchScore ?? 0) - (a.faceMatchScore ?? 0)
+  );
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
@@ -439,7 +745,7 @@ const MyCaseDetailModal = ({
             <Text style={[detailS.sectionTitle, { color: theme.text }]}>👁 Sighting Reports</Text>
             {sightings.length > 0 && (
               <Text style={[detailS.sectionCount, { color: theme.textSecondary }]}>
-                {sightings.length} total
+                {sightings.length} total · sorted by match score
               </Text>
             )}
           </View>
@@ -449,7 +755,7 @@ const MyCaseDetailModal = ({
               <ActivityIndicator color={theme.primary} />
               <Text style={{ color: theme.textSecondary, marginTop: 8 }}>Loading sightings…</Text>
             </View>
-          ) : sightings.length === 0 ? (
+          ) : sortedSightings.length === 0 ? (
             <View style={[detailS.emptyCard, { backgroundColor: theme.surface, borderColor: theme.border }]}>
               <Text style={{ fontSize: 36, marginBottom: 8 }}>🔍</Text>
               <Text style={[detailS.emptyTitle, { color: theme.text }]}>No sightings yet</Text>
@@ -458,11 +764,15 @@ const MyCaseDetailModal = ({
               </Text>
             </View>
           ) : (
-            sightings.map((s) => (
+            sortedSightings.map((s) => (
               <SightingCard
                 key={s.id}
                 item={s}
                 theme={theme}
+                onPress={() => {
+                  setSelectedSighting(s);
+                  setSightingDetail(true);
+                }}
                 onReport={(sighting) => {
                   setReportTarget(sighting);
                   setReportModal(true);
@@ -471,6 +781,14 @@ const MyCaseDetailModal = ({
             ))
           )}
         </ScrollView>
+
+        {/* Sighting detail modal */}
+        <SightingDetailModal
+          visible={sightingDetail}
+          sighting={selectedSighting}
+          theme={theme}
+          onClose={() => { setSightingDetail(false); setSelectedSighting(null); }}
+        />
 
         {/* Report Modal */}
         <ReportModal
@@ -486,24 +804,24 @@ const MyCaseDetailModal = ({
 };
 
 const detailS = StyleSheet.create({
-  root:         { flex: 1 },
-  header:       { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1 },
-  closeBtn:     { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
-  headerTitle:  { flex: 1, fontSize: 16, fontWeight: "800", textAlign: "center", marginHorizontal: 8 },
-  viewFullBtn:  { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
-  banner:       { flexDirection: "row", borderRadius: 14, padding: 12, marginBottom: 20, borderWidth: 1, gap: 12 },
-  bannerPhoto:  { width: 64, height: 78, borderRadius: 10 },
+  root:                   { flex: 1 },
+  header:                 { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 14, borderBottomWidth: 1 },
+  closeBtn:               { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
+  headerTitle:            { flex: 1, fontSize: 16, fontWeight: "800", textAlign: "center", marginHorizontal: 8 },
+  viewFullBtn:            { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8 },
+  banner:                 { flexDirection: "row", borderRadius: 14, padding: 12, marginBottom: 20, borderWidth: 1, gap: 12 },
+  bannerPhoto:            { width: 64, height: 78, borderRadius: 10 },
   bannerPhotoPlaceholder: { width: 64, height: 78, borderRadius: 10, alignItems: "center", justifyContent: "center" },
-  bannerName:   { fontSize: 16, fontWeight: "800", marginBottom: 2 },
-  bannerMeta:   { fontSize: 12, marginBottom: 2 },
-  bannerLocation:{ fontSize: 12 },
-  statusPill:   { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
-  sectionHeader:{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
-  sectionTitle: { fontSize: 16, fontWeight: "800" },
-  sectionCount: { fontSize: 13 },
-  emptyCard:    { borderRadius: 14, padding: 32, alignItems: "center", borderWidth: 1 },
-  emptyTitle:   { fontSize: 15, fontWeight: "700", marginBottom: 4 },
-  emptySub:     { fontSize: 13, textAlign: "center", lineHeight: 18 },
+  bannerName:             { fontSize: 16, fontWeight: "800", marginBottom: 2 },
+  bannerMeta:             { fontSize: 12, marginBottom: 2 },
+  bannerLocation:         { fontSize: 12 },
+  statusPill:             { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+  sectionHeader:          { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
+  sectionTitle:           { fontSize: 16, fontWeight: "800" },
+  sectionCount:           { fontSize: 11 },
+  emptyCard:              { borderRadius: 14, padding: 32, alignItems: "center", borderWidth: 1 },
+  emptyTitle:             { fontSize: 15, fontWeight: "700", marginBottom: 4 },
+  emptySub:               { fontSize: 13, textAlign: "center", lineHeight: 18 },
 });
 
 // ── Main Profile Screen ───────────────────────────────────────────────────────
@@ -515,11 +833,11 @@ export default function ProfileScreen() {
 
   const user = auth.currentUser;
 
-  const [cases,       setCases]       = useState<MissingCase[]>([]);
-  const [loading,     setLoading]     = useState(true);
-  const [refreshing,  setRefreshing]  = useState(false);
-  const [selectedCase,setSelectedCase]= useState<MissingCase | null>(null);
-  const [caseModal,   setCaseModal]   = useState(false);
+  const [cases,        setCases]        = useState<MissingCase[]>([]);
+  const [loading,      setLoading]      = useState(true);
+  const [refreshing,   setRefreshing]   = useState(false);
+  const [selectedCase, setSelectedCase] = useState<MissingCase | null>(null);
+  const [caseModal,    setCaseModal]    = useState(false);
 
   const loadCases = useCallback(async () => {
     if (!user) return;
@@ -552,9 +870,9 @@ export default function ProfileScreen() {
     ]);
   };
 
-  const activeCases   = cases.filter((c) => c.status === "active");
-  const resolvedCases = cases.filter((c) => c.status === "found" || c.status === "resolved");
-  const totalSightings= cases.reduce((sum, c) => sum + (c.sightings || 0), 0);
+  const activeCases    = cases.filter((c) => c.status === "active");
+  const resolvedCases  = cases.filter((c) => c.status === "found" || c.status === "resolved");
+  const totalSightings = cases.reduce((sum, c) => sum + (c.sightings || 0), 0);
 
   if (!user) {
     return (
@@ -589,7 +907,7 @@ export default function ProfileScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{ paddingBottom: 40 }}
       >
-        {/* ── Profile Hero ── */}
+        {/* Profile Hero */}
         <LinearGradient
           colors={isDark ? ["#0A1A0A", theme.background] : ["#2ECC71", "#27AE60"]}
           style={S.heroGradient}
@@ -598,7 +916,7 @@ export default function ProfileScreen() {
             {user.photoURL ? (
               <Image source={{ uri: user.photoURL }} style={S.avatar} />
             ) : (
-              <View style={[S.avatarPlaceholder]}>
+              <View style={S.avatarPlaceholder}>
                 <Text style={S.avatarInitial}>
                   {(user.displayName ?? user.email ?? "?")[0].toUpperCase()}
                 </Text>
@@ -614,13 +932,13 @@ export default function ProfileScreen() {
           </Text>
         </LinearGradient>
 
-        {/* ── Stats Row ── */}
+        {/* Stats Row */}
         <View style={[S.statsRow, { backgroundColor: theme.card, borderColor: theme.border }]}>
           {[
-            { label: "Total\nReported",  value: cases.length,     icon: "📋" },
-            { label: "Active\nCases",    value: activeCases.length,   icon: "🔍" },
-            { label: "Found /\nResolved",value: resolvedCases.length, icon: "✅" },
-            { label: "Sightings\nReceived", value: totalSightings,    icon: "👁" },
+            { label: "Total\nReported",   value: cases.length,          icon: "📋" },
+            { label: "Active\nCases",     value: activeCases.length,    icon: "🔍" },
+            { label: "Found /\nResolved", value: resolvedCases.length,  icon: "✅" },
+            { label: "Sightings\nReceived", value: totalSightings,      icon: "👁" },
           ].map(({ label, value, icon }) => (
             <View key={label} style={S.statItem}>
               <Text style={S.statIcon}>{icon}</Text>
@@ -630,13 +948,13 @@ export default function ProfileScreen() {
           ))}
         </View>
 
-        {/* ── Account Info Card ── */}
+        {/* Account Info Card */}
         <View style={[S.card, { backgroundColor: theme.card, borderColor: theme.border }]}>
           <Text style={[S.cardTitle, { color: theme.textSecondary }]}>👤  ACCOUNT DETAILS</Text>
           {[
-            { icon: "📛", label: "Display Name", value: user.displayName || "Not set" },
-            { icon: "📧", label: "Email",         value: user.email || "Not set" },
-            { icon: "🔐", label: "Provider",      value: user.providerData[0]?.providerId === "google.com" ? "Google" : "Email / Password" },
+            { icon: "📛", label: "Display Name",  value: user.displayName || "Not set" },
+            { icon: "📧", label: "Email",          value: user.email || "Not set" },
+            { icon: "🔐", label: "Provider",       value: user.providerData[0]?.providerId === "google.com" ? "Google" : "Email / Password" },
             { icon: "✅", label: "Email Verified", value: user.emailVerified ? "Verified" : "Not verified" },
           ].map(({ icon, label, value }) => (
             <View key={label} style={[S.infoRow, { borderBottomColor: theme.border }]}>
@@ -649,11 +967,14 @@ export default function ProfileScreen() {
           ))}
         </View>
 
-        {/* ── My Cases ── */}
+        {/* My Cases */}
         <View style={S.section}>
           <View style={S.sectionHeader}>
             <Text style={[S.sectionTitle, { color: theme.text }]}>📋 My Reported Cases</Text>
-            <TouchableOpacity onPress={() => router.push("/report-missing")} style={[S.addBtn, { backgroundColor: theme.primary }]}>
+            <TouchableOpacity
+              onPress={() => router.push("/report-missing")}
+              style={[S.addBtn, { backgroundColor: theme.primary }]}
+            >
               <Text style={S.addBtnText}>+ New</Text>
             </TouchableOpacity>
           </View>
@@ -683,22 +1004,23 @@ export default function ProfileScreen() {
                 key={c.id}
                 item={c}
                 theme={theme}
-                onPress={() => {
-                  setSelectedCase(c);
-                  setCaseModal(true);
-                }}
+                onPress={() => { setSelectedCase(c); setCaseModal(true); }}
               />
             ))
           )}
         </View>
 
-        {/* ── Sign Out Button ── */}
-        <TouchableOpacity style={[S.signOutBtn, { borderColor: "#E74C3C" }]} onPress={handleSignOut} activeOpacity={0.85}>
+        {/* Sign Out */}
+        <TouchableOpacity
+          style={[S.signOutBtn, { borderColor: "#E74C3C" }]}
+          onPress={handleSignOut}
+          activeOpacity={0.85}
+        >
           <Text style={S.signOutText}>🚪 Sign Out</Text>
         </TouchableOpacity>
       </ScrollView>
 
-      {/* ── My Case Detail Modal ── */}
+      {/* My Case Detail Modal */}
       <MyCaseDetailModal
         visible={caseModal}
         caseItem={selectedCase}
@@ -708,8 +1030,6 @@ export default function ProfileScreen() {
     </SafeAreaView>
   );
 }
-
-// ── Styles ────────────────────────────────────────────────────────────────────
 
 const S = StyleSheet.create({
   root:   { flex: 1 },
@@ -724,11 +1044,11 @@ const S = StyleSheet.create({
   heroEmail:         { fontSize: 13, color: "rgba(255,255,255,0.8)", marginBottom: 4 },
   heroJoined:        { fontSize: 11, color: "rgba(255,255,255,0.6)" },
 
-  statsRow:   { flexDirection: "row", marginHorizontal: 16, marginTop: -1, borderRadius: 14, borderWidth: 1, overflow: "hidden" },
-  statItem:   { flex: 1, alignItems: "center", paddingVertical: 14, paddingHorizontal: 4 },
-  statIcon:   { fontSize: 18, marginBottom: 4 },
-  statValue:  { fontSize: 18, fontWeight: "900" },
-  statLabel:  { fontSize: 9, fontWeight: "600", textAlign: "center", marginTop: 2, lineHeight: 13 },
+  statsRow:  { flexDirection: "row", marginHorizontal: 16, marginTop: -1, borderRadius: 14, borderWidth: 1, overflow: "hidden" },
+  statItem:  { flex: 1, alignItems: "center", paddingVertical: 14, paddingHorizontal: 4 },
+  statIcon:  { fontSize: 18, marginBottom: 4 },
+  statValue: { fontSize: 18, fontWeight: "900" },
+  statLabel: { fontSize: 9, fontWeight: "600", textAlign: "center", marginTop: 2, lineHeight: 13 },
 
   card:      { margin: 16, borderRadius: 14, padding: 16, borderWidth: 1 },
   cardTitle: { fontSize: 11, fontWeight: "800", letterSpacing: 1.2, marginBottom: 8 },
@@ -744,10 +1064,10 @@ const S = StyleSheet.create({
   addBtn:        { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 10 },
   addBtnText:    { color: "#fff", fontWeight: "800", fontSize: 13 },
 
-  emptyCard:       { borderRadius: 14, padding: 28, alignItems: "center", borderWidth: 1, marginBottom: 16 },
-  emptyTitle:      { fontSize: 16, fontWeight: "800", marginBottom: 6 },
-  emptySub:        { fontSize: 13, textAlign: "center", lineHeight: 18, marginBottom: 16 },
-  reportFirstBtn:  { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10 },
+  emptyCard:      { borderRadius: 14, padding: 28, alignItems: "center", borderWidth: 1, marginBottom: 16 },
+  emptyTitle:     { fontSize: 16, fontWeight: "800", marginBottom: 6 },
+  emptySub:       { fontSize: 13, textAlign: "center", lineHeight: 18, marginBottom: 16 },
+  reportFirstBtn: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 10 },
 
   signOutBtn:  { marginHorizontal: 16, marginTop: 8, height: 50, borderRadius: 12, borderWidth: 1.5, alignItems: "center", justifyContent: "center" },
   signOutText: { color: "#E74C3C", fontWeight: "700", fontSize: 15 },

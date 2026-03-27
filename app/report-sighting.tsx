@@ -1,17 +1,23 @@
+// app/report-sighting.tsx
 import React, { useState, useEffect, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TextInput,
   TouchableOpacity, Alert, ActivityIndicator,
-  Image, FlatList, Animated, useColorScheme,
+  Image, FlatList, Animated, useColorScheme, Modal,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import * as ImagePicker from "expo-image-picker";
 import { router, useLocalSearchParams } from "expo-router";
-import { addDocument, getCollection } from "../src/firebase/firestoreService";
-import { uploadImageToCloudinary } from "../src/services/cloudinaryService";
+import { getCollection } from "../src/firebase/firestoreService";
 import { auth } from "../src/firebase/firebaseConfig";
 import { Colors, ColorScheme } from "../src/constants/colors";
 import LocationPicker, { LocationResult } from "../src/components/LocationPicker.native";
+import DateTimePicker, { formatDateTime } from "../src/components/DateTimePicker";
+import {
+  submitSightingReport,
+  SubmitSightingResult,
+} from "../src/features/sightings/reportSightingController";
+import { getMatchText } from "../src/features/faceRecognition/faceMatcher";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -19,6 +25,87 @@ interface MissingCase {
   id: string; name: string; age: number; gender: string;
   photoUrl?: string; lastSeenLocation: string;
 }
+
+// ── Face Match Result Modal ───────────────────────────────────────────────────
+
+const FaceMatchModal = ({
+  visible, result, onClose, theme,
+}: {
+  visible: boolean;
+  result: SubmitSightingResult | null;
+  onClose: () => void;
+  theme: ColorScheme;
+}) => {
+  if (!result) return null;
+  const score = result.faceMatchScore;
+  const color = result.faceMatchColor;
+  const label = getMatchText(result.faceMatchLabel);
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={modalStyles.overlay}>
+        <View style={[modalStyles.card, { backgroundColor: theme.card }]}>
+          <Text style={[modalStyles.title, { color: theme.text }]}>Sighting Submitted ✅</Text>
+          <Text style={[modalStyles.sub, { color: theme.textSecondary }]}>Face comparison result</Text>
+
+          {result.faceMatchAttempted && !result.faceMatchError ? (
+            <>
+              <View style={[modalStyles.scoreCircle, { borderColor: color }]}>
+                <Text style={[modalStyles.scoreNumber, { color }]}>{score.toFixed(0)}%</Text>
+                <Text style={[modalStyles.scoreLabel, { color }]}>match</Text>
+              </View>
+              <View style={[modalStyles.badge, { backgroundColor: color + "22", borderColor: color }]}>
+                <Text style={[modalStyles.badgeText, { color }]}>{label}</Text>
+              </View>
+              <Text style={[modalStyles.interpretation, { color: theme.textSecondary }]}>
+                {result.isSamePerson
+                  ? "⚠️ This person is likely the missing individual. Authorities have been notified."
+                  : score >= 60
+                  ? "🔍 Possible match detected. Authorities will review your sighting report."
+                  : "ℹ️ Low facial similarity. Your sighting has still been recorded for review."}
+              </Text>
+            </>
+          ) : (
+            <View style={[modalStyles.noFaceBox, { backgroundColor: theme.surface }]}>
+              <Text style={{ fontSize: 32, marginBottom: 8 }}>📷</Text>
+              <Text style={[modalStyles.noFaceText, { color: theme.textSecondary }]}>
+                {result.faceMatchError || "Face comparison was not run."}
+              </Text>
+              <Text style={[modalStyles.noFaceHint, { color: theme.textSecondary }]}>
+                Your sighting has been recorded. Upload a clearer face photo next time for automatic comparison.
+              </Text>
+            </View>
+          )}
+
+          <TouchableOpacity
+            style={[modalStyles.doneBtn, { backgroundColor: theme.primary }]}
+            onPress={onClose}
+          >
+            <Text style={modalStyles.doneBtnText}>Done</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </Modal>
+  );
+};
+
+const modalStyles = StyleSheet.create({
+  overlay:        { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", alignItems: "center", justifyContent: "center", padding: 24 },
+  card:           { width: "100%", borderRadius: 20, padding: 28, alignItems: "center" },
+  title:          { fontSize: 20, fontWeight: "800", marginBottom: 4 },
+  sub:            { fontSize: 13, marginBottom: 24 },
+  scoreCircle:    { width: 120, height: 120, borderRadius: 60, borderWidth: 5, alignItems: "center", justifyContent: "center", marginBottom: 16 },
+  scoreNumber:    { fontSize: 36, fontWeight: "900" },
+  scoreLabel:     { fontSize: 13, fontWeight: "600" },
+  badge:          { paddingHorizontal: 18, paddingVertical: 7, borderRadius: 20, borderWidth: 1.5, marginBottom: 16 },
+  badgeText:      { fontSize: 14, fontWeight: "700" },
+  interpretation: { fontSize: 13, textAlign: "center", lineHeight: 20, marginBottom: 24, paddingHorizontal: 8 },
+  noFaceBox:      { width: "100%", borderRadius: 12, padding: 16, alignItems: "center", marginBottom: 24 },
+  noFaceText:     { fontSize: 13, textAlign: "center", fontWeight: "600", marginBottom: 8 },
+  noFaceHint:     { fontSize: 12, textAlign: "center", lineHeight: 18 },
+  doneBtn:        { width: "100%", height: 52, borderRadius: 14, alignItems: "center", justifyContent: "center" },
+  doneBtnText:    { color: "#fff", fontWeight: "800", fontSize: 16 },
+});
 
 // ── Case Card ─────────────────────────────────────────────────────────────────
 
@@ -104,16 +191,19 @@ export default function ReportSightingScreen() {
 
   const [sightingLocation, setSightingLocation] = useState("");
   const [sightingCoords, setSightingCoords]     = useState<{ latitude: number; longitude: number } | null>(null);
-  const [sightingDate, setSightingDate]         = useState("");
+  const [sightingDate, setSightingDate]         = useState<Date | null>(null); // ← now a Date object
   const [description, setDescription]           = useState("");
-  const [confidence, setConfidence]             = useState("medium");
+  const [confidence, setConfidence]             = useState<"low" | "medium" | "high">("medium");
   const [contactPhone, setContactPhone]         = useState("");
   const [imageUri, setImageUri]                 = useState<string | null>(null);
 
   const [loadingCases, setLoadingCases] = useState(true);
   const [submitting, setSubmitting]     = useState(false);
   const [errors, setErrors]             = useState<Record<string, string>>({});
-  const [step, setStep] = useState<"select" | "details">(params.caseId ? "details" : "select");
+  const [step, setStep]                 = useState<"select" | "details">(params.caseId ? "details" : "select");
+
+  const [matchResult, setMatchResult]       = useState<SubmitSightingResult | null>(null);
+  const [showMatchModal, setShowMatchModal] = useState(false);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
@@ -136,15 +226,34 @@ export default function ReportSightingScreen() {
   );
 
   const pickImage = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, quality: 0.8 });
-    if (!result.canceled) setImageUri(result.assets[0].uri);
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert("Permission needed", "Please allow access to your photo library in Settings.");
+        return;
+      }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        allowsMultipleSelection: false,
+        selectionLimit: 1,
+        quality: 0.8,
+        base64: false,
+      });
+      if (!result.canceled && result.assets.length > 0) {
+        setImageUri(result.assets[0].uri);
+      }
+    } catch (e: any) {
+      console.error("Image picker error:", e);
+      Alert.alert("Error", "Could not open photo library. Please try again.");
+    }
   };
 
   const validate = (): boolean => {
     const errs: Record<string, string> = {};
     if (!selectedCaseId)          errs.case        = "Please select a case";
     if (!sightingLocation.trim()) errs.location    = "Location is required";
-    if (!sightingDate.trim())     errs.date        = "Date/time is required";
+    if (!sightingDate)            errs.date        = "Please select the date and time";
     if (!description.trim())      errs.description = "Please describe what you saw";
     setErrors(errs);
     return Object.keys(errs).length === 0;
@@ -153,37 +262,32 @@ export default function ReportSightingScreen() {
   const handleSubmit = async () => {
     if (!validate()) return;
     setSubmitting(true);
-    let photoUrl = "";
     try {
-      if (imageUri) {
-        const uploaded = await uploadImageToCloudinary(imageUri);
-        photoUrl = uploaded.url;
-      }
-      await addDocument("sightings", {
+      const result = await submitSightingReport({
         caseId:           selectedCaseId,
         sightingLocation: sightingLocation.trim(),
-        sightingDate:     sightingDate.trim(),
+        sightingDate:     sightingDate ? formatDateTime(sightingDate) : "",
         description:      description.trim(),
         confidence,
         contactPhone:     contactPhone.trim(),
-        photoUrl,
-        coordinates:  sightingCoords || null,
-        sightingLat:  sightingCoords?.latitude  ?? null,
-        sightingLng:  sightingCoords?.longitude ?? null,
-        reportedBy:     auth.currentUser?.uid,
-        reportedByName: auth.currentUser?.displayName || "Anonymous",
-        verified: false,
+        imageUri,
+        coordinates:      sightingCoords,
       });
-      Alert.alert("✅ Sighting Reported", "Thank you for your report. The authorities have been notified.",
-        [{ text: "Back to Alerts", onPress: () => router.replace("/alerts") }]
-      );
+      setMatchResult(result);
+      setShowMatchModal(true);
     } catch (e) {
       console.error(e);
       Alert.alert("Error", "Failed to submit sighting. Please try again.");
-    } finally { setSubmitting(false); }
+    } finally {
+      setSubmitting(false);
+    }
   };
 
-  // Fully typed — no implicit any
+  const handleModalClose = () => {
+    setShowMatchModal(false);
+    router.replace("/alerts");
+  };
+
   const handleLocationConfirm = (result: LocationResult) => {
     setSightingLocation(result.address);
     if (result.lat !== 0 || result.lng !== 0) {
@@ -199,13 +303,25 @@ export default function ReportSightingScreen() {
     paddingHorizontal: 14, height: 52, marginBottom: 16,
   } as const;
 
-  const textAreaStyle = { ...inputStyle, height: 110, paddingTop: 12, textAlignVertical: "top" as const };
+  const textAreaStyle = {
+    ...inputStyle, height: 110, paddingTop: 12,
+    textAlignVertical: "top" as const,
+  };
 
-  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <View style={[styles.root, { backgroundColor: theme.background }]}>
 
-      <LinearGradient colors={isDark ? ["#0A100A", theme.background] : ["#F0FFF0", theme.background]} style={styles.header}>
+      <FaceMatchModal
+        visible={showMatchModal}
+        result={matchResult}
+        onClose={handleModalClose}
+        theme={theme}
+      />
+
+      <LinearGradient
+        colors={isDark ? ["#0A100A", theme.background] : ["#F0FFF0", theme.background]}
+        style={styles.header}
+      >
         <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
           <Text style={[styles.backText, { color: theme.textSecondary }]}>← Back</Text>
         </TouchableOpacity>
@@ -235,7 +351,13 @@ export default function ReportSightingScreen() {
           <View style={{ flex: 1 }}>
             <View style={[styles.searchWrap, { backgroundColor: theme.surface, borderColor: theme.border }]}>
               <Text style={styles.searchIcon}>🔍</Text>
-              <TextInput style={[styles.searchInput, { color: theme.text }]} value={searchQuery} onChangeText={setSearchQuery} placeholder="Search by name or location…" placeholderTextColor={theme.textSecondary} />
+              <TextInput
+                style={[styles.searchInput, { color: theme.text }]}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+                placeholder="Search by name or location…"
+                placeholderTextColor={theme.textSecondary}
+              />
             </View>
             {errors.case && <Text style={[styles.errorText, { color: theme.error }]}>{errors.case}</Text>}
             {loadingCases ? (
@@ -245,10 +367,19 @@ export default function ReportSightingScreen() {
                 data={filteredCases}
                 keyExtractor={(i) => i.id}
                 renderItem={({ item }) => (
-                  <CaseCard item={item} selected={selectedCaseId === item.id} onSelect={() => { setSelectedCaseId(item.id); setStep("details"); }} theme={theme} />
+                  <CaseCard
+                    item={item}
+                    selected={selectedCaseId === item.id}
+                    onSelect={() => { setSelectedCaseId(item.id); setStep("details"); }}
+                    theme={theme}
+                  />
                 )}
                 contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 40 }}
-                ListEmptyComponent={<View style={styles.center}><Text style={[styles.emptyText, { color: theme.textSecondary }]}>No active cases found</Text></View>}
+                ListEmptyComponent={
+                  <View style={styles.center}>
+                    <Text style={[styles.emptyText, { color: theme.textSecondary }]}>No active cases found</Text>
+                  </View>
+                }
               />
             )}
           </View>
@@ -256,25 +387,40 @@ export default function ReportSightingScreen() {
 
         {/* ── Step 2: Sighting Details ── */}
         {step === "details" && (
-          <ScrollView contentContainerStyle={styles.detailsScroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
-
+          <ScrollView
+            contentContainerStyle={styles.detailsScroll}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
             {selectedCase && (
               <View style={[styles.selectedBanner, { borderColor: theme.primary, backgroundColor: theme.card }]}>
                 {selectedCase.photoUrl
                   ? <Image source={{ uri: selectedCase.photoUrl }} style={styles.bannerPhoto} />
-                  : <View style={[styles.bannerPhoto, { backgroundColor: theme.border, alignItems: "center", justifyContent: "center" }]}><Text style={{ fontSize: 22 }}>👤</Text></View>
+                  : <View style={[styles.bannerPhoto, { backgroundColor: theme.border, alignItems: "center", justifyContent: "center" }]}>
+                      <Text style={{ fontSize: 22 }}>👤</Text>
+                    </View>
                 }
                 <View style={{ flex: 1 }}>
                   <Text style={[styles.bannerLabel, { color: theme.textSecondary }]}>Reporting sighting for</Text>
                   <Text style={[styles.bannerName, { color: theme.text }]}>{selectedCase.name}</Text>
                 </View>
-                <TouchableOpacity onPress={() => setStep("select")} style={[styles.changeBtn, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+                <TouchableOpacity
+                  onPress={() => setStep("select")}
+                  style={[styles.changeBtn, { backgroundColor: theme.surface, borderColor: theme.border }]}
+                >
                   <Text style={[styles.changeBtnText, { color: theme.textSecondary }]}>Change</Text>
                 </TouchableOpacity>
               </View>
             )}
 
-            {/* ── Sighting Location ── */}
+            {/* Face comparison info banner */}
+            <View style={[styles.faceInfoBanner, { backgroundColor: "#EAF3DE", borderColor: "#2ECC71" }]}>
+              <Text style={styles.faceInfoIcon}>🔍</Text>
+              <Text style={styles.faceInfoText}>
+                Attach a photo of the person you saw for automatic face comparison with the missing person's photo.
+              </Text>
+            </View>
+
             <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
               📍 WHERE DID YOU SEE THEM? <Text style={{ color: theme.primary }}>*</Text>
             </Text>
@@ -301,44 +447,107 @@ export default function ReportSightingScreen() {
             )}
             {errors.location && <Text style={[styles.errorText, { color: theme.error }]}>{errors.location}</Text>}
 
+            {/* ── Date & Time Picker ── */}
             <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
-              🕐 WHEN? <Text style={{ color: theme.primary }}>*</Text>
+              🕐 WHEN DID YOU SEE THEM? <Text style={{ color: theme.primary }}>*</Text>
             </Text>
-            <TextInput style={inputStyle} value={sightingDate} onChangeText={setSightingDate} placeholder="e.g. Today at 2:30 PM" placeholderTextColor={theme.textSecondary} />
-            {errors.date && <Text style={[styles.errorText, { color: theme.error }]}>{errors.date}</Text>}
+            <DateTimePicker
+              value={sightingDate}
+              onChange={(date) => {
+                setSightingDate(date);
+                setErrors((e) => ({ ...e, date: "" }));
+              }}
+              placeholder="Tap to select date and time"
+              primaryColor={theme.primary}
+              borderColor={errors.date ? theme.error : theme.border}
+              textColor={theme.text}
+              backgroundColor={theme.card}
+            />
+            {errors.date && (
+              <Text style={[styles.errorText, { color: theme.error, marginTop: 4 }]}>{errors.date}</Text>
+            )}
+
+            <View style={{ marginBottom: 16 }} />
 
             <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>
               📝 DESCRIBE WHAT YOU SAW <Text style={{ color: theme.primary }}>*</Text>
             </Text>
-            <TextInput style={textAreaStyle} value={description} onChangeText={setDescription} placeholder="What were they doing? Were they alone? Any details that could help…" placeholderTextColor={theme.textSecondary} multiline numberOfLines={4} />
+            <TextInput
+              style={textAreaStyle}
+              value={description}
+              onChangeText={setDescription}
+              placeholder="What were they doing? Were they alone? Any details that could help…"
+              placeholderTextColor={theme.textSecondary}
+              multiline
+              numberOfLines={4}
+            />
             {errors.description && <Text style={[styles.errorText, { color: theme.error }]}>{errors.description}</Text>}
 
             <Text style={[styles.fieldLabel, { color: theme.textSecondary }]}>🎯 HOW CONFIDENT ARE YOU?</Text>
-            <ConfidenceSelector value={confidence} onChange={setConfidence} theme={theme} />
+            <ConfidenceSelector
+              value={confidence}
+              onChange={(v) => setConfidence(v as "low" | "medium" | "high")}
+              theme={theme}
+            />
 
             <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginTop: 20 }]}>📞 YOUR PHONE (optional)</Text>
-            <TextInput style={inputStyle} value={contactPhone} onChangeText={setContactPhone} placeholder="Authorities may contact you" placeholderTextColor={theme.textSecondary} keyboardType="phone-pad" />
+            <TextInput
+              style={inputStyle}
+              value={contactPhone}
+              onChangeText={setContactPhone}
+              placeholder="Authorities may contact you"
+              placeholderTextColor={theme.textSecondary}
+              keyboardType="phone-pad"
+            />
 
-            <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginTop: 4 }]}>📷 ATTACH PHOTO (optional)</Text>
+            <Text style={[styles.fieldLabel, { color: theme.textSecondary, marginTop: 4 }]}>
+              📷 ATTACH PHOTO <Text style={{ color: theme.primary }}>*recommended for face match</Text>
+            </Text>
             {imageUri ? (
               <View style={styles.imagePreviewWrap}>
                 <Image source={{ uri: imageUri }} style={styles.imagePreview} />
-                <TouchableOpacity onPress={() => setImageUri(null)} style={[styles.removeBtn, { backgroundColor: theme.card, borderColor: theme.error }]}>
+                <TouchableOpacity
+                  onPress={() => setImageUri(null)}
+                  style={[styles.removeBtn, { backgroundColor: theme.card, borderColor: theme.error }]}
+                >
                   <Text style={[styles.removeBtnText, { color: theme.error }]}>✕ Remove</Text>
                 </TouchableOpacity>
               </View>
             ) : (
-              <TouchableOpacity style={[styles.addPhotoBtn, { borderColor: theme.border }]} onPress={pickImage}>
+              <TouchableOpacity
+                style={[styles.addPhotoBtn, { borderColor: theme.border }]}
+                onPress={pickImage}
+              >
                 <Text style={styles.addPhotoIcon}>📷</Text>
-                <Text style={[styles.addPhotoBtnText, { color: theme.textSecondary }]}>Attach Photo Evidence</Text>
+                <Text style={[styles.addPhotoBtnText, { color: theme.textSecondary }]}>
+                  Attach Photo for Face Comparison
+                </Text>
               </TouchableOpacity>
             )}
 
-            <TouchableOpacity style={styles.submitWrap} onPress={handleSubmit} disabled={submitting} activeOpacity={0.85}>
-              <LinearGradient colors={[theme.success, "#228B22"]} style={styles.submitBtn} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}>
-                {submitting ? <ActivityIndicator color="#fff" /> : <Text style={styles.submitText}>👁 Submit Sighting Report</Text>}
+            <TouchableOpacity
+              style={styles.submitWrap}
+              onPress={handleSubmit}
+              disabled={submitting}
+              activeOpacity={0.85}
+            >
+              <LinearGradient
+                colors={[theme.success, "#228B22"]}
+                style={styles.submitBtn}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+              >
+                {submitting ? (
+                  <View style={styles.submittingRow}>
+                    <ActivityIndicator color="#fff" />
+                    <Text style={[styles.submitText, { marginLeft: 10 }]}>Analysing face…</Text>
+                  </View>
+                ) : (
+                  <Text style={styles.submitText}>👁 Submit Sighting Report</Text>
+                )}
               </LinearGradient>
             </TouchableOpacity>
+
           </ScrollView>
         )}
       </Animated.View>
@@ -347,12 +556,12 @@ export default function ReportSightingScreen() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
-  header:      { paddingTop: 54, paddingBottom: 16, paddingHorizontal: 20 },
-  backBtn:     { marginBottom: 8 },
-  backText:    { fontSize: 14 },
-  headerTitle: { fontSize: 22, fontWeight: "800" },
-  headerSub:   { fontSize: 13, marginTop: 2 },
+  root:         { flex: 1 },
+  header:       { paddingTop: 54, paddingBottom: 16, paddingHorizontal: 20 },
+  backBtn:      { marginBottom: 8 },
+  backText:     { fontSize: 14 },
+  headerTitle:  { fontSize: 22, fontWeight: "800" },
+  headerSub:    { fontSize: 13, marginTop: 2 },
 
   tabs:    { flexDirection: "row", borderBottomWidth: 1 },
   tab:     { flex: 1, paddingVertical: 14, alignItems: "center", borderBottomWidth: 3, borderBottomColor: "transparent" },
@@ -366,12 +575,16 @@ const styles = StyleSheet.create({
   emptyText: { fontSize: 15 },
 
   detailsScroll:  { padding: 20, paddingBottom: 60 },
-  selectedBanner: { flexDirection: "row", alignItems: "center", borderRadius: 14, padding: 12, marginBottom: 20, borderWidth: 1, gap: 12 },
+  selectedBanner: { flexDirection: "row", alignItems: "center", borderRadius: 14, padding: 12, marginBottom: 16, borderWidth: 1, gap: 12 },
   bannerPhoto:    { width: 48, height: 48, borderRadius: 10 },
   bannerLabel:    { fontSize: 11 },
   bannerName:     { fontWeight: "700", fontSize: 15 },
   changeBtn:      { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, borderWidth: 1 },
   changeBtnText:  { fontSize: 12, fontWeight: "600" },
+
+  faceInfoBanner: { flexDirection: "row", alignItems: "center", borderRadius: 12, padding: 12, marginBottom: 20, borderWidth: 1, gap: 10 },
+  faceInfoIcon:   { fontSize: 18 },
+  faceInfoText:   { flex: 1, fontSize: 12, color: "#27AE60", lineHeight: 17 },
 
   fieldLabel:   { fontSize: 11, fontWeight: "700", letterSpacing: 1, marginBottom: 8, marginTop: 4 },
   coordsNote:   { fontSize: 11, marginBottom: 8, fontStyle: "italic" },
@@ -385,7 +598,8 @@ const styles = StyleSheet.create({
   removeBtn:        { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 8, borderWidth: 1 },
   removeBtnText:    { fontWeight: "700", fontSize: 13 },
 
-  submitWrap: { borderRadius: 14, overflow: "hidden", marginTop: 8 },
-  submitBtn:  { height: 58, alignItems: "center", justifyContent: "center", borderRadius: 14 },
-  submitText: { color: "#fff", fontSize: 16, fontWeight: "800", letterSpacing: 0.5 },
+  submitWrap:    { borderRadius: 14, overflow: "hidden", marginTop: 8 },
+  submitBtn:     { height: 58, alignItems: "center", justifyContent: "center", borderRadius: 14 },
+  submitText:    { color: "#fff", fontSize: 16, fontWeight: "800", letterSpacing: 0.5 },
+  submittingRow: { flexDirection: "row", alignItems: "center" },
 });

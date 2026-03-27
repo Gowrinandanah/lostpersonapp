@@ -87,8 +87,28 @@ export const getMissingPersons = (
   );
 };
 
+// Admin: get ALL missing persons regardless of status
+export const getAllMissingPersons = (
+  callback: (data: DocumentData[]) => void
+) => {
+  return subscribeToCollection(
+    "missingPersons",
+    [orderBy("createdAt", "desc")],
+    callback
+  );
+};
+
 export const getMissingPersonById = (id: string) =>
   getDocument("missingPersons", id);
+
+export const verifyCase = (id: string) =>
+  updateDocument("missingPersons", id, { status: "active", verified: true });
+
+export const rejectCase = (id: string) =>
+  updateDocument("missingPersons", id, { status: "rejected", verified: false });
+
+export const resolveCase = (id: string) =>
+  updateDocument("missingPersons", id, { status: "resolved" });
 
 // ── Sightings ────────────────────────────────────────────────────────────────
 
@@ -110,3 +130,26 @@ export const getUserProfile = (uid: string) =>
 
 export const updateUserProfile = (uid: string, data: Partial<DocumentData>) =>
   updateDocument("users", uid, data);
+
+// Admin: get all users
+export const getAllUsers = (
+  callback: (data: DocumentData[]) => void
+) => {
+  return subscribeToCollection(
+    "users",
+    [orderBy("createdAt", "desc")],
+    callback
+  );
+};
+
+export const banUser = (uid: string) =>
+  updateDocument("users", uid, { banned: true });
+
+export const unbanUser = (uid: string) =>
+  updateDocument("users", uid, { banned: false });
+
+export const promoteToAdmin = (uid: string) =>
+  updateDocument("users", uid, { role: "admin" });
+
+export const demoteFromAdmin = (uid: string) =>
+  updateDocument("users", uid, { role: "user" });

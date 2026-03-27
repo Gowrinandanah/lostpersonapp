@@ -4,7 +4,9 @@ import {
   ActivityIndicator, Modal, Alert, Platform,
   TextInput, FlatList, Keyboard,
 } from "react-native";
-import MapView, { Marker, UrlTile, Polygon, MapPressEvent } from "react-native-maps";
+import MapView, {
+  Marker, UrlTile, Polygon, MapPressEvent, PROVIDER_DEFAULT,
+} from "react-native-maps";
 import * as Location from "expo-location";
 
 // ── Exported types ────────────────────────────────────────────────────────────
@@ -27,7 +29,7 @@ interface SearchResult {
   display_name: string;
   lat: string;
   lon: string;
-  boundingbox?: [string, string, string, string]; // [minLat, maxLat, minLng, maxLng]
+  boundingbox?: [string, string, string, string];
 }
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -99,7 +101,6 @@ export default function LocationPicker({
     minLat: number; maxLat: number; minLng: number; maxLng: number;
   } | null>(null);
 
-  // Jump to user location on modal open
   useEffect(() => {
     if (!visible) return;
     setSearchQuery("");
@@ -119,7 +120,6 @@ export default function LocationPicker({
     })();
   }, [visible]);
 
-  // Debounced search — fires 500ms after user stops typing
   const handleSearchChange = (text: string) => {
     setSearchQuery(text);
     setShowResults(false);
@@ -134,7 +134,6 @@ export default function LocationPicker({
     }, 500);
   };
 
-  // On Enter — immediately search without waiting for debounce
   const handleSubmitSearch = async () => {
     if (searchQuery.trim().length < 3) return;
     if (searchTimer.current) clearTimeout(searchTimer.current);
@@ -150,7 +149,6 @@ export default function LocationPicker({
     handleSelectResult(results[0]);
   };
 
-  // Fly to result using bounding box so the area is clearly framed
   const handleSelectResult = (result: SearchResult) => {
     Keyboard.dismiss();
     setShowResults(false);
@@ -160,10 +158,8 @@ export default function LocationPicker({
     const lng = parseFloat(result.lon);
 
     let newRegion = {
-      latitude:      lat,
-      longitude:     lng,
-      latitudeDelta:  0.01,
-      longitudeDelta: 0.01,
+      latitude: lat, longitude: lng,
+      latitudeDelta: 0.01, longitudeDelta: 0.01,
     };
 
     if (result.boundingbox && result.boundingbox.length === 4) {
@@ -187,8 +183,6 @@ export default function LocationPicker({
       setHighlight(null);
     }
 
-    // setRegion moves the map immediately via React state (guaranteed)
-    // animateToRegion adds a smooth animation on top if the ref is ready
     setRegion(newRegion);
     setTimeout(() => {
       mapRef.current?.animateToRegion(newRegion, 800);
@@ -196,7 +190,7 @@ export default function LocationPicker({
   };
 
   const placePin = async (lat: number, lng: number) => {
-    setHighlight(null); // remove bounding box once user pins a spot
+    setHighlight(null);
     setMarker({ latitude: lat, longitude: lng });
     setResolving(true);
     const addr = await reverseGeocode(lat, lng);
@@ -208,26 +202,33 @@ export default function LocationPicker({
     setLocating(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") { Alert.alert("Permission denied", "Location access is required."); return; }
+      if (status !== "granted") {
+        Alert.alert("Permission denied", "Location access is required.");
+        return;
+      }
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
       const { latitude, longitude } = loc.coords;
       const r = { latitude, longitude, latitudeDelta: 0.01, longitudeDelta: 0.01 };
       setRegion(r);
       setTimeout(() => mapRef.current?.animateToRegion(r, 700), 100);
       await placePin(latitude, longitude);
-    } catch { Alert.alert("Error", "Could not get current location."); }
-    finally { setLocating(false); }
+    } catch {
+      Alert.alert("Error", "Could not get current location.");
+    } finally {
+      setLocating(false);
+    }
   };
 
   const handleConfirm = () => {
-    if (!marker) { Alert.alert("No location", "Tap the map to drop a pin first."); return; }
+    if (!marker) {
+      Alert.alert("No location", "Tap the map to drop a pin first.");
+      return;
+    }
     const addr = resolved || `${marker.latitude.toFixed(5)}, ${marker.longitude.toFixed(5)}`;
     setConfirmed(addr);
     onConfirm({ address: addr, lat: marker.latitude, lng: marker.longitude });
     setVisible(false);
   };
-
-  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <>
@@ -244,7 +245,12 @@ export default function LocationPicker({
       </TouchableOpacity>
 
       {/* Full-screen map modal */}
-      <Modal visible={visible} animationType="slide" presentationStyle="fullScreen" onRequestClose={() => setVisible(false)}>
+      <Modal
+        visible={visible}
+        animationType="slide"
+        presentationStyle="fullScreen"
+        onRequestClose={() => setVisible(false)}
+      >
         <View style={{ flex: 1 }}>
 
           {/* Header */}
@@ -256,7 +262,7 @@ export default function LocationPicker({
             <View style={{ width: 36 }} />
           </View>
 
-          {/* Search bar + dropdown — sits above map via zIndex */}
+          {/* Search bar */}
           <View style={S.searchWrap}>
             <View style={S.searchBox}>
               <Text style={S.searchIcon}>🔍</Text>
@@ -319,13 +325,14 @@ export default function LocationPicker({
             <Text style={S.instructionText}>📌 Tap anywhere on the map to drop a pin</Text>
           </View>
 
-          {/* Map */}
+          {/* Map — PROVIDER_DEFAULT + UrlTile FIRST child = tiles always render */}
           <MapView
             ref={mapRef}
             style={{ flex: 1 }}
+            provider={PROVIDER_DEFAULT}
+            mapType="none"
             region={region}
             onRegionChangeComplete={setRegion}
-            mapType="none"
             showsUserLocation
             showsMyLocationButton={false}
             onPress={(e: MapPressEvent) => {
@@ -337,13 +344,15 @@ export default function LocationPicker({
               );
             }}
           >
-            {/* CartoDB Voyager — free, no API key, no app blocking */}
+            {/* UrlTile MUST be first child for tiles to render */}
             <UrlTile
               urlTemplate="https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
               maximumZ={19}
               flipY={false}
+              zIndex={-1}
             />
-            {/* Bounding box highlight — shows after search, clears when pin is placed */}
+
+            {/* Bounding box highlight after search */}
             {highlight && (
               <Polygon
                 coordinates={[
@@ -357,8 +366,13 @@ export default function LocationPicker({
                 fillColor="rgba(46,204,113,0.12)"
               />
             )}
+
             {marker && (
-              <Marker coordinate={marker} pinColor={pinColor} title="Selected Location" />
+              <Marker
+                coordinate={marker}
+                pinColor={pinColor}
+                title="Selected Location"
+              />
             )}
           </MapView>
 
@@ -407,8 +421,6 @@ export default function LocationPicker({
     </>
   );
 }
-
-// ── Styles ────────────────────────────────────────────────────────────────────
 
 const S = StyleSheet.create({
   trigger:            { flexDirection: "row", alignItems: "center", backgroundColor: G.white, borderWidth: 1.5, borderColor: "#E0E0E0", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, gap: 10 },

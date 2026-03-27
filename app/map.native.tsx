@@ -8,9 +8,10 @@ import {
   TextInput,
   FlatList,
   Animated,
-  Platform,
 } from "react-native";
-import MapView, { Marker, UrlTile, Callout } from "react-native-maps";
+import MapView, {
+  Marker, UrlTile, Callout, PROVIDER_DEFAULT,
+} from "react-native-maps";
 import * as Location from "expo-location";
 import { router, Stack } from "expo-router";
 import { Timestamp } from "firebase/firestore";
@@ -57,7 +58,7 @@ function isUrgent(p: MissingPerson): boolean {
   return false;
 }
 
-// ── List row (shown in bottom panel) ─────────────────────────────────────────
+// ── List row ──────────────────────────────────────────────────────────────────
 
 const CaseRow = ({ item, onPress }: { item: MapMarker; onPress: () => void }) => (
   <TouchableOpacity style={rowS.row} onPress={onPress} activeOpacity={0.85}>
@@ -88,8 +89,6 @@ const rowS = StyleSheet.create({
   location:      { fontSize: 11, color: G.muted },
 });
 
-// ── Toggle: Map / List ────────────────────────────────────────────────────────
-
 type ViewMode = "map" | "list";
 
 export default function MapScreen() {
@@ -112,7 +111,6 @@ export default function MapScreen() {
       const persons = data as MissingPerson[];
       const mapped: MapMarker[] = persons
         .filter((p) => {
-          // Accept coordinates from either field shape
           const lat = p.coordinates?.latitude  ?? p.lastSeenLat;
           const lng = p.coordinates?.longitude ?? p.lastSeenLng;
           return lat != null && lng != null;
@@ -178,7 +176,7 @@ export default function MapScreen() {
         headerBackTitle: "",
       }} />
 
-      {/* ── Search bar ── */}
+      {/* Search bar */}
       <View style={S.searchWrap}>
         <View style={S.searchBox}>
           <Text style={{ fontSize: 14, marginRight: 6 }}>🔍</Text>
@@ -196,7 +194,6 @@ export default function MapScreen() {
             </TouchableOpacity>
           )}
         </View>
-        {/* Map / List toggle */}
         <View style={S.toggleWrap}>
           <TouchableOpacity
             style={[S.toggleBtn, viewMode === "map" && S.toggleActive]}
@@ -213,7 +210,7 @@ export default function MapScreen() {
         </View>
       </View>
 
-      {/* ── Filter chips ── */}
+      {/* Filter chips */}
       <View style={S.chips}>
         <TouchableOpacity
           style={[S.chip, filter === "all" && S.chipActive]}
@@ -231,8 +228,6 @@ export default function MapScreen() {
             🔴 Urgent ({urgentCount})
           </Text>
         </TouchableOpacity>
-
-        {/* Legend */}
         <View style={S.legend}>
           <View style={[S.legendDot, { backgroundColor: G.urgent }]} />
           <Text style={S.legendText}>Missing</Text>
@@ -242,7 +237,6 @@ export default function MapScreen() {
       </View>
 
       <Animated.View style={[{ flex: 1 }, { opacity: fadeAnim }]}>
-
         {loading ? (
           <View style={S.center}>
             <ActivityIndicator color={G.primary} size="large" />
@@ -250,24 +244,25 @@ export default function MapScreen() {
           </View>
         ) : viewMode === "map" ? (
 
-          /* ── MAP VIEW ── */
+          /* MAP VIEW */
           <View style={{ flex: 1 }}>
             <MapView
               ref={mapRef}
               style={{ flex: 1 }}
-              initialRegion={DEFAULT_REGION}
+              provider={PROVIDER_DEFAULT}
               mapType="none"
+              initialRegion={DEFAULT_REGION}
               showsUserLocation
               showsMyLocationButton={false}
             >
-              {/* CartoDB Voyager — free, no API key, no app blocking */}
+              {/* UrlTile MUST be first child */}
               <UrlTile
                 urlTemplate="https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
                 maximumZ={19}
                 flipY={false}
+                zIndex={-1}
               />
 
-              {/* 🔴 Missing persons — last seen pins */}
               {filtered.map((m) => (
                 <Marker
                   key={`missing-${m.id}`}
@@ -308,7 +303,6 @@ export default function MapScreen() {
               }
             </TouchableOpacity>
 
-            {/* No pins note */}
             {filtered.length === 0 && (
               <View style={S.noMarkersBanner}>
                 <Text style={S.noMarkersText}>
@@ -319,8 +313,7 @@ export default function MapScreen() {
           </View>
 
         ) : (
-
-          /* ── LIST VIEW ── */
+          /* LIST VIEW */
           filtered.length === 0 ? (
             <View style={S.center}>
               <Text style={{ fontSize: 40, marginBottom: 10 }}>🔍</Text>
@@ -352,27 +345,21 @@ export default function MapScreen() {
 const S = StyleSheet.create({
   root: { flex: 1, backgroundColor: G.bg },
 
-  searchWrap: {
-    flexDirection: "row", alignItems: "center",
-    paddingHorizontal: 12, paddingVertical: 8,
-    backgroundColor: G.white,
-    borderBottomWidth: 1, borderBottomColor: "#EEEEEE",
-    gap: 8,
-  },
+  searchWrap: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, backgroundColor: G.white, borderBottomWidth: 1, borderBottomColor: "#EEEEEE", gap: 8 },
   searchBox:  { flex: 1, flexDirection: "row", alignItems: "center", backgroundColor: G.bg, borderRadius: 10, paddingHorizontal: 12, height: 40, borderWidth: 1, borderColor: "#EEEEEE" },
   searchText: { flex: 1, fontSize: 14, color: G.text },
 
-  toggleWrap:      { flexDirection: "row", borderRadius: 8, overflow: "hidden", borderWidth: 1, borderColor: G.border },
-  toggleBtn:       { paddingHorizontal: 10, paddingVertical: 6, backgroundColor: G.white },
-  toggleActive:    { backgroundColor: G.light },
-  toggleText:      { fontSize: 16, color: G.sub },
-  toggleTextActive:{ color: G.dark },
+  toggleWrap:       { flexDirection: "row", borderRadius: 8, overflow: "hidden", borderWidth: 1, borderColor: G.border },
+  toggleBtn:        { paddingHorizontal: 10, paddingVertical: 6, backgroundColor: G.white },
+  toggleActive:     { backgroundColor: G.light },
+  toggleText:       { fontSize: 16, color: G.sub },
+  toggleTextActive: { color: G.dark },
 
-  chips:     { flexDirection: "row", paddingHorizontal: 12, paddingVertical: 8, gap: 8, backgroundColor: G.white, borderBottomWidth: 1, borderBottomColor: "#EEEEEE", alignItems: "center" },
-  chip:      { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: "#DDDDDD", backgroundColor: G.white },
-  chipActive:{ backgroundColor: G.light, borderColor: G.dark },
-  chipUrgent:{ backgroundColor: G.urgent, borderColor: G.urgent },
-  chipText:  { fontSize: 12, fontWeight: "600", color: G.sub },
+  chips:          { flexDirection: "row", paddingHorizontal: 12, paddingVertical: 8, gap: 8, backgroundColor: G.white, borderBottomWidth: 1, borderBottomColor: "#EEEEEE", alignItems: "center" },
+  chip:           { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: "#DDDDDD", backgroundColor: G.white },
+  chipActive:     { backgroundColor: G.light, borderColor: G.dark },
+  chipUrgent:     { backgroundColor: G.urgent, borderColor: G.urgent },
+  chipText:       { fontSize: 12, fontWeight: "600", color: G.sub },
   chipTextActive: { color: G.dark },
 
   legend:    { flexDirection: "row", alignItems: "center", marginLeft: "auto" as any, gap: 4 },
@@ -381,40 +368,19 @@ const S = StyleSheet.create({
 
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
 
-  // Map overlays
-  statsOverlay: {
-    position: "absolute", top: 10, left: 10,
-    backgroundColor: "rgba(255,255,255,0.92)",
-    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6,
-    borderWidth: 1, borderColor: G.border,
-    shadowColor: "#000", shadowOpacity: 0.1, shadowRadius: 4, elevation: 3,
-  },
-  statsText: { fontSize: 12, fontWeight: "700", color: G.dark },
+  statsOverlay: { position: "absolute", top: 10, left: 10, backgroundColor: "rgba(255,255,255,0.92)", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: G.border, shadowColor: "#000", shadowOpacity: 0.1, shadowRadius: 4, elevation: 3 },
+  statsText:    { fontSize: 12, fontWeight: "700", color: G.dark },
 
-  gpsBtn: {
-    position: "absolute", right: 14, bottom: 90,
-    width: 48, height: 48, borderRadius: 24,
-    backgroundColor: G.white,
-    alignItems: "center", justifyContent: "center",
-    shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 6,
-    elevation: 6, borderWidth: 1, borderColor: G.border,
-  },
+  gpsBtn: { position: "absolute", right: 14, bottom: 90, width: 48, height: 48, borderRadius: 24, backgroundColor: G.white, alignItems: "center", justifyContent: "center", shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 6, elevation: 6, borderWidth: 1, borderColor: G.border },
 
-  noMarkersBanner: {
-    position: "absolute", bottom: 80, left: 16, right: 16,
-    backgroundColor: "rgba(255,255,255,0.95)",
-    borderRadius: 12, padding: 14,
-    borderWidth: 1, borderColor: G.border,
-    alignItems: "center",
-  },
-  noMarkersText: { fontSize: 13, color: G.sub, textAlign: "center" },
+  noMarkersBanner: { position: "absolute", bottom: 80, left: 16, right: 16, backgroundColor: "rgba(255,255,255,0.95)", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: G.border, alignItems: "center" },
+  noMarkersText:   { fontSize: 13, color: G.sub, textAlign: "center" },
 
-  // Callout
-  callout:          { width: 200, padding: 4 },
-  calloutName:      { fontSize: 14, fontWeight: "800", color: G.text, marginBottom: 2 },
-  calloutMeta:      { fontSize: 12, color: G.sub, marginBottom: 2 },
-  calloutLocation:  { fontSize: 11, color: G.muted, marginBottom: 4 },
-  calloutUrgent:    { backgroundColor: "#FDECEA", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2, marginBottom: 4 },
-  calloutUrgentText:{ fontSize: 10, fontWeight: "800", color: G.urgent },
-  calloutTap:       { fontSize: 11, color: G.primary, fontWeight: "700", textAlign: "right" },
+  callout:           { width: 200, padding: 4 },
+  calloutName:       { fontSize: 14, fontWeight: "800", color: G.text, marginBottom: 2 },
+  calloutMeta:       { fontSize: 12, color: G.sub, marginBottom: 2 },
+  calloutLocation:   { fontSize: 11, color: G.muted, marginBottom: 4 },
+  calloutUrgent:     { backgroundColor: "#FDECEA", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2, marginBottom: 4 },
+  calloutUrgentText: { fontSize: 10, fontWeight: "800", color: G.urgent },
+  calloutTap:        { fontSize: 11, color: G.primary, fontWeight: "700", textAlign: "right" },
 });
