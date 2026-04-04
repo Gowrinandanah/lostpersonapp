@@ -1,91 +1,222 @@
-import React from 'react';
-import { Marker, Callout } from 'react-native-maps';
-import { View, Text, StyleSheet } from 'react-native';
-import { router } from 'expo-router';
-import { MapMarkerData } from '../types/map';
-
+import React from "react";
+import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
+import { PointAnnotation, Callout } from "@maplibre/maplibre-react-native";
+import { router } from "expo-router";
+import type { MapMarkerData } from "../types/map";
+import Svg, { Path, Text as SvgText } from "react-native-svg";
 interface MapMarkerProps {
   data: MapMarkerData;
   onPress?: (id: string) => void;
 }
 
-const G = {
-  primary: "#2ECC71",
-  urgent: "#E74C3C",
-  white: "#FFFFFF",
-  dark: "#27AE60",
-  text: "#1A1A1A",
-  sub: "#666666",
+const C = {
+  urgent: "#7B1FA2",  // 🟣 purple  — urgent cases
+  active: "#E53935",  // 🔴 red     — all other active cases
+  white:  "#FFFFFF",
+  text:   "#1A1A1A",
+  sub:    "#555555",
+  muted:  "#888888",
 };
 
+// ── Teardrop pin ──────────────────────────────────────────────────────────────
+const TearDrop = ({ color }: { color: string }) => {
+  return (
+    <Svg width={24} height={36} viewBox="0 0 24 36">
+      <Path
+        d="M12 0C7 0 4 5 4 10c0 6 8 16 8 16s8-10 8-16C20 5 17 0 12 0z"
+        fill={color}
+        stroke="#fff"
+        strokeWidth={1.5}
+      />
+    </Svg>
+  );
+};
+
+// ── Urgent pulse ring ─────────────────────────────────────────────────────────
+const UrgentRing = ({ size = 36 }: { size?: number }) => (
+  <View
+    style={{
+      position: "absolute",
+      top: -(size * 0.3),
+      left: -(size * 0.3),
+      width: size * 1.6,
+      height: size * 1.6,
+      borderRadius: size * 0.8,
+      borderWidth: 2,
+      borderColor: C.urgent,
+      opacity: 0.4,
+    }}
+  />
+);
+
+// ── Main component ────────────────────────────────────────────────────────────
 export default function MapMarker({ data, onPress }: MapMarkerProps) {
+  // 🟣 purple if urgent, 🔴 red otherwise
+  const pinColor = data.isUrgent ? C.urgent : C.active;
+
   const handlePress = () => {
     if (onPress) {
       onPress(data.id);
     } else {
-      router.push({
-        pathname: "/case-details",
-        params: { id: data.id }
-      });
+      router.push({ pathname: "/case-details", params: { id: data.id } });
     }
   };
 
   return (
-    <Marker
-      coordinate={{
-        latitude: data.latitude,
-        longitude: data.longitude,
-      }}
-      pinColor={data.isUrgent ? G.urgent : G.primary}
-      onPress={handlePress}
+    <PointAnnotation
+  id={`marker-${data.id}`}
+  coordinate={[data.longitude, data.latitude]}
+  anchor={{ x: 0.5, y: 1 }}
+  onSelected={handlePress}
+>
+  <View style={{ alignItems: "center" }}>
+    {/* Optional urgent pulse ring */}
+    {data.isUrgent && <UrgentRing size={30} />}
+
+    {/* Teardrop SVG */}
+    <Svg width={24} height={36} viewBox="0 0 24 36">
+      <Path
+        d="M12 0C7 0 4 5 4 10c0 6 8 16 8 16s8-10 8-16C20 5 17 0 12 0z"
+        fill={data.isUrgent ? C.urgent : C.active}
+        stroke="#fff"
+        strokeWidth={1.5}
+      />
+    </Svg>
+
+    {/* Name BELOW the drop */}
+    <View
+      style={[
+        styles.nameTag,
+        {
+          borderColor: data.isUrgent ? C.urgent : C.active,
+          marginTop: 4,
+        },
+      ]}
     >
-      <Callout>
-        <View style={styles.callout}>
-          <Text style={styles.calloutName}>{data.name}</Text>
-          <Text style={styles.calloutDetails}>Age: {data.age} · {data.gender}</Text>
-          <Text style={styles.calloutLocation}>{data.lastSeenLocation}</Text>
-          {data.isUrgent && (
-            <View style={styles.urgentBadge}>
-              <Text style={styles.urgentText}>URGENT</Text>
-            </View>
-          )}
+      <Text
+        style={[
+          styles.nameText,
+          { color: data.isUrgent ? C.urgent : C.active },
+        ]}
+        numberOfLines={1}
+      >
+        {data.name}
+      </Text>
+    </View>
+  </View>
+
+  {/* Callout */}
+  <Callout>
+    <View style={styles.callout}>
+      <View style={[styles.strip, { backgroundColor: data.isUrgent ? C.urgent : C.active }]}>
+        <Text style={styles.stripText}>
+          {data.isUrgent ? "⚠ URGENT · MISSING PERSON" : "MISSING PERSON"}
+        </Text>
+      </View>
+
+      <View style={styles.calloutBody}>
+        <Text style={styles.calloutName}>{data.name}</Text>
+        <Text style={styles.calloutMeta}>
+          {data.age} yrs · {data.gender}
+        </Text>
+
+        <View style={styles.locRow}>
+          <Text style={styles.locPin}>📍</Text>
+          <Text style={styles.locText} numberOfLines={2}>
+            {data.lastSeenLocation}
+          </Text>
         </View>
-      </Callout>
-    </Marker>
+
+        <TouchableOpacity
+          style={[styles.detailsBtn, { backgroundColor: data.isUrgent ? C.urgent : C.active }]}
+          onPress={handlePress}
+          activeOpacity={0.82}
+        >
+          <Text style={styles.detailsBtnText}>View Full Details →</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  </Callout>
+</PointAnnotation>
   );
 }
 
 const styles = StyleSheet.create({
-  callout: {
-    width: 180,
-    padding: 8,
+  pinWrap: {
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 10,
   },
-  calloutName: {
-    fontSize: 14,
-    fontWeight: "700",
-    color: G.text,
-    marginBottom: 2,
-  },
-  calloutDetails: {
-    fontSize: 11,
-    color: G.sub,
-    marginBottom: 2,
-  },
-  calloutLocation: {
-    fontSize: 11,
-    color: G.sub,
-    marginBottom: 4,
-  },
-  urgentBadge: {
-    backgroundColor: G.urgent,
+
+  nameTag: {
+    marginTop: 2,
+    backgroundColor: "#fff",
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
-    alignSelf: 'flex-start',
+    borderRadius: 6,
+    borderWidth: 1,
+    maxWidth: 90,
   },
-  urgentText: {
-    color: G.white,
-    fontSize: 9,
+  nameText: {
+    fontSize: 10,
     fontWeight: "700",
+    textAlign: "center",
+  },
+
+  callout: {
+    width: 220,
+    borderRadius: 12,
+    overflow: "hidden",
+    backgroundColor: C.white,
+  },
+  strip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    alignItems: "center",
+  },
+  stripText: {
+    color: "#fff",
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.9,
+  },
+  calloutBody: {
+    padding: 12,
+  },
+  calloutName: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: C.text,
+    marginBottom: 3,
+  },
+  calloutMeta: {
+    fontSize: 12,
+    color: C.sub,
+    marginBottom: 6,
+  },
+  locRow: {
+    flexDirection: "row",
+    gap: 4,
+    marginBottom: 10,
+  },
+  locPin: {
+    fontSize: 12,
+    marginTop: 1,
+  },
+  locText: {
+    fontSize: 12,
+    color: C.muted,
+    flex: 1,
+    lineHeight: 17,
+  },
+  detailsBtn: {
+    borderRadius: 8,
+    paddingVertical: 8,
+    alignItems: "center",
+  },
+  detailsBtnText: {
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: "800",
   },
 });

@@ -1,3 +1,5 @@
+//reposrt-missing.tsx
+
 import React, { useState, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TextInput,
@@ -227,7 +229,7 @@ export default function ReportMissingScreen() {
       // Also store as timestamp for sorting/filtering
       lastSeenTimestamp: lastSeenDate ?? null,
       contactName: contactName.trim() || null, contactPhone: contactPhone.trim(),
-      photoUrl: photoUrl || null, status: "active",
+      photoUrl: photoUrl || null, status: "pending",verified:"false",
       coordinates:  lastSeenCoords || null,
       lastSeenLat:  lastSeenCoords?.latitude  ?? null,
       lastSeenLng:  lastSeenCoords?.longitude ?? null,

@@ -1,7 +1,5 @@
-// This file is required by Expo Router as a fallback sibling for map.native.tsx.
-// On Android/iOS, map.native.tsx is used instead of this file.
-// On web, this renders a simple placeholder since the map is mobile-only.
 
+//map.tsx
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 

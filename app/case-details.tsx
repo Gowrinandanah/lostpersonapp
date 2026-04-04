@@ -1,3 +1,5 @@
+// case-details.tsx
+
 import React, { useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, ScrollView, Image,
@@ -9,8 +11,10 @@ import { doc, getDoc, Timestamp } from "firebase/firestore";
 import { db } from "../src/firebase/firebaseConfig";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
+import * as Location from 'expo-location';
 import { Colors, ColorScheme } from "../src/constants/colors";
 import { cacheDirectory, getInfoAsync, downloadAsync } from "expo-file-system/legacy";
+import { calculateDistance } from "../src/utils/locationHelper";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -34,15 +38,11 @@ interface MissingPerson {
   createdAt: Timestamp | null;
   lastSeenLat?: number | null;
   lastSeenLng?: number | null;
-  isUrgentFlag?: boolean;  // reporter manually marked urgent
-  isVulnerable?: boolean;  // auto-set: child <18 or elderly >65
+  isUrgentFlag?: boolean;
+  isVulnerable?: boolean;
 }
 
 // ── Urgency logic ─────────────────────────────────────────────────────────────
-// A case is urgent if ANY of:
-//   1. Reporter explicitly flagged it as urgent
-//   2. Person is a child (<18) or elderly (>65) — always vulnerable
-//   3. Report is less than 48 hours old (fresh disappearance)
 
 function checkUrgent(p: MissingPerson): boolean {
   if (p.isUrgentFlag)  return true;
@@ -127,6 +127,8 @@ export default function CaseDetailsScreen() {
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState("");
   const [sharing,  setSharing]  = useState(false);
+  const [distance, setDistance] = useState<number | null>(null);
+  const [locationStatus, setLocationStatus] = useState<string>("checking");
 
   useEffect(() => {
     if (!id) { setError("No case ID provided."); setLoading(false); return; }
@@ -134,7 +136,11 @@ export default function CaseDetailsScreen() {
       try {
         const snap = await getDoc(doc(db, "missingPersons", id));
         if (!snap.exists()) { setError("Case not found."); return; }
-        setPerson({ id: snap.id, ...snap.data() } as MissingPerson);
+        const caseData = { id: snap.id, ...snap.data() } as MissingPerson;
+        setPerson(caseData);
+        
+        // Calculate distance if coordinates exist
+        await calculateDistanceToCase(caseData);
       } catch (e) {
         console.error(e);
         setError("Failed to load case. Check your connection.");
@@ -144,17 +150,47 @@ export default function CaseDetailsScreen() {
     })();
   }, [id]);
 
+  const calculateDistanceToCase = async (caseData: MissingPerson) => {
+    // Check if case has coordinates
+    if (!caseData.lastSeenLat || !caseData.lastSeenLng) {
+      setLocationStatus("no_coords");
+      return;
+    }
+
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        setLocationStatus("denied");
+        return;
+      }
+
+      const location = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
+      });
+
+      const userLat = location.coords.latitude;
+      const userLng = location.coords.longitude;
+
+      const dist = calculateDistance(
+        { latitude: userLat, longitude: userLng },
+        { latitude: caseData.lastSeenLat, longitude: caseData.lastSeenLng },
+        'km'
+      );
+
+      setDistance(dist);
+      setLocationStatus("granted");
+    } catch (error) {
+      console.error("Error calculating distance:", error);
+      setLocationStatus("error");
+    }
+  };
+
   // ── Share — text + photo ─────────────────────────────────────────────────────
-  // Strategy:
-  //   Android — Share.share() accepts both message + url, so the native sheet
-  //             shows the text AND the image together in most apps (WhatsApp etc.)
-  //   iOS     — Share.share() url works for images stored locally; we download
-  //             the photo first then pass the local file URI as url alongside message.
-  //             Most iOS apps will pick up both.
   const handleShare = async () => {
     if (!person) return;
     setSharing(true);
 
+    const distanceText = distance ? `\n📍 ${distance} km from your location` : "";
     const alertText =
       `🚨 MISSING PERSON ALERT
 
@@ -163,15 +199,14 @@ export default function CaseDetailsScreen() {
 ` +
       `Age: ${person.age} · ${person.gender}
 ` +
-      (person.height     ? `Height: ${person.height} cm
-`       : "") +
-      (person.complexion ? `Complexion: ${person.complexion}
-`   : "") +
+      (person.height     ? `Height: ${person.height} cm\n`       : "") +
+      (person.complexion ? `Complexion: ${person.complexion}\n`   : "") +
       `
 Last Seen: ${person.lastSeenLocation}
 ` +
       `Date / Time: ${person.lastSeenDate}
 ` +
+      distanceText +
       `
 Contact: ${person.contactName ? person.contactName + " — " : ""}${person.contactPhone}
 ` +
@@ -181,7 +216,6 @@ If you have any information please call the contact above immediately.`;
     try {
       let imageUri: string | undefined;
 
-      // Download photo to local cache so we can pass a file:// URI
       if (person.photoUrl) {
         try {
           const ext      = person.photoUrl.split("?")[0].split(".").pop() || "jpg";
@@ -191,14 +225,9 @@ If you have any information please call the contact above immediately.`;
             await downloadAsync(person.photoUrl, localUri);
           }
           imageUri = localUri;
-        } catch (_) {
-          // Photo download failed — continue without it
-        }
+        } catch (_) {}
       }
 
-      // React Native's Share API:
-      //   message — shown as text in all apps
-      //   url     — on iOS this attaches the file; on Android some apps use it
       await Share.share(
         {
           title:   `🚨 Missing Person: ${person.name}`,
@@ -211,7 +240,6 @@ If you have any information please call the contact above immediately.`;
         }
       );
     } catch (e: any) {
-      // Share.share throws if user cancels on some platforms — ignore that
       if (!String(e?.message).includes("cancel")) {
         Alert.alert("Share failed", "Could not open the share sheet.");
       }
@@ -265,6 +293,22 @@ If you have any information please call the contact above immediately.`;
   const reported = formatDate(person.createdAt);
   const resolved = person.status === "found" || person.status === "resolved";
 
+  // Get distance display text
+  const getDistanceDisplay = () => {
+    if (distance === null) return null;
+    if (distance < 1) {
+      return `${Math.round(distance * 1000)} meters away`;
+    }
+    return `${distance} km away`;
+  };
+
+  const getDistanceColor = () => {
+    if (!distance) return "#666";
+    if (distance < 5) return "#E74C3C"; // Red - very close
+    if (distance < 20) return "#F39C12"; // Orange - moderately close
+    return "#27AE60"; // Green - far
+  };
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
@@ -297,6 +341,24 @@ If you have any information please call the contact above immediately.`;
             }
             style={S.heroBg}
           />
+          
+          {/* Distance Header - NEW */}
+          {locationStatus === "granted" && distance !== null && (
+            <View style={[S.distanceHeader, { backgroundColor: "rgba(0,0,0,0.6)" }]}>
+              <Text style={S.distanceHeaderIcon}>📍</Text>
+              <Text style={S.distanceHeaderText}>
+                Last seen <Text style={{ fontWeight: "900" }}>{getDistanceDisplay()}</Text>
+              </Text>
+            </View>
+          )}
+          
+          {locationStatus === "denied" && (
+            <View style={[S.distanceHeader, { backgroundColor: "rgba(0,0,0,0.6)" }]}>
+              <Text style={S.distanceHeaderIcon}>⚠️</Text>
+              <Text style={S.distanceHeaderText}>Enable location to see distance</Text>
+            </View>
+          )}
+
           {person.photoUrl ? (
             <Image source={{ uri: person.photoUrl }} style={S.heroPhoto} resizeMode="cover" />
           ) : (
@@ -331,6 +393,30 @@ If you have any information please call the contact above immediately.`;
           <Text style={S.heroReported}>Reported on {reported}</Text>
         </View>
 
+        {/* ── Distance Card - Detailed Info ── */}
+        {locationStatus === "granted" && distance !== null && (
+          <View style={[S.distanceCard, { backgroundColor: theme.card, borderColor: getDistanceColor() }]}>
+            <View style={S.distanceCardContent}>
+              <Text style={S.distanceCardIcon}>📏</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={[S.distanceCardTitle, { color: getDistanceColor() }]}>
+                  {distance < 1 
+                    ? `${Math.round(distance * 1000)} meters from you`
+                    : `${distance} km from your location`}
+                </Text>
+                <Text style={[S.distanceCardSub, { color: theme.textSecondary }]}>
+                  The person was last seen at this location
+                </Text>
+                {distance < 10 && (
+                  <View style={S.closeProximityBadge}>
+                    <Text style={S.closeProximityText}>⚠️ YOU'RE IN THE AREA</Text>
+                  </View>
+                )}
+              </View>
+            </View>
+          </View>
+        )}
+
         {/* ── Sightings counter ── */}
         {person.sightings > 0 && (
           <View style={[S.sightingsBanner, { backgroundColor: "#FFF3CD", borderColor: "#FFC107" }]}>
@@ -358,6 +444,14 @@ If you have any information please call the contact above immediately.`;
           <SectionCard title="📍  LAST KNOWN LOCATION" theme={theme}>
             <DetailRow icon="📍" label="Location"    value={person.lastSeenLocation} theme={theme} />
             <DetailRow icon="🕐" label="Date & Time" value={person.lastSeenDate}     theme={theme} />
+            {person.lastSeenLat && person.lastSeenLng && (
+              <DetailRow 
+                icon="🗺️" 
+                label="Coordinates" 
+                value={`${person.lastSeenLat.toFixed(6)}, ${person.lastSeenLng.toFixed(6)}`} 
+                theme={theme} 
+              />
+            )}
           </SectionCard>
 
           {/* ── Physical Description ── */}
@@ -475,6 +569,69 @@ const S = StyleSheet.create({
   heroName:            { fontSize: 26, fontWeight: "900", color: "#fff", textAlign: "center", textShadowColor: "rgba(0,0,0,0.25)", textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4 },
   heroMeta:            { fontSize: 15, color: "rgba(255,255,255,0.85)", marginTop: 4, textAlign: "center" },
   heroReported:        { fontSize: 12, color: "rgba(255,255,255,0.65)", marginTop: 4 },
+
+  // New distance header styles
+  distanceHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginBottom: 16,
+  },
+  distanceHeaderIcon: {
+    fontSize: 16,
+    color: "#fff",
+  },
+  distanceHeaderText: {
+    fontSize: 13,
+    color: "#fff",
+    fontWeight: "600",
+  },
+  distanceCard: {
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 8,
+    borderRadius: 12,
+    borderWidth: 2,
+    padding: 16,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  distanceCardContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  distanceCardIcon: {
+    fontSize: 32,
+  },
+  distanceCardTitle: {
+    fontSize: 16,
+    fontWeight: "900",
+  },
+  distanceCardSub: {
+    fontSize: 12,
+    marginTop: 2,
+  },
+  closeProximityBadge: {
+    backgroundColor: "#E74C3C",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 8,
+    marginTop: 8,
+    alignSelf: "flex-start",
+  },
+  closeProximityText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.5,
+  },
 
   badges:      { flexDirection: "row", gap: 8, marginBottom: 10, flexWrap: "wrap", justifyContent: "center" },
   badgeUrgent: { backgroundColor: "rgba(255,255,255,0.25)", borderRadius: 20, paddingHorizontal: 12, paddingVertical: 5, borderWidth: 1, borderColor: "rgba(255,255,255,0.5)" },

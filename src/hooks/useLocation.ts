@@ -1,178 +1,82 @@
-import { useState, useEffect, useRef } from 'react';
-import * as Location from 'expo-location';
-import { Platform } from 'react-native';
-import { doc, updateDoc } from 'firebase/firestore';
-import { auth, db } from '../firebase/firebaseConfig';
+import { useEffect, useRef, useState } from "react";
+import * as Location from "expo-location";
+import { doc, updateDoc, getDoc } from "firebase/firestore";
+import { db } from "../firebase/firebaseConfig";
+import { getAuth } from "firebase/auth";
+import { GeofencingService } from "../services/geofencingService";
 
-// Update the interface to match expo-location's types
-interface LocationData {
-  latitude: number;
-  longitude: number;
-  accuracy?: number | null;  // Allow null
-  altitude?: number | null;   // Allow null
-  timestamp: number;
-}
+export function useLocation() {
+  const watchRef = useRef<Location.LocationSubscription | null>(null);
+  const [lastLocation, setLastLocation] = useState<Location.LocationObject | null>(null);
 
-interface UseLocationReturn {
-  location: LocationData | null;
-  errorMsg: string | null;
-  permissionGranted: boolean | null;
-  startTracking: () => Promise<void>;
-  stopTracking: () => void;
-  getCurrentLocation: () => Promise<LocationData | null>;
-  isTracking: boolean;
-}
+  useEffect(() => {
+    let active = true;
 
-export const useLocation = (trackInterval: number = 10000): UseLocationReturn => {
-  const [location, setLocation] = useState<LocationData | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
-  const [isTracking, setIsTracking] = useState(false);
-  
-  const locationSubscription = useRef<Location.LocationSubscription | null>(null);
+    (async () => {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted" || !active) return;
 
-  // Update user location in Firestore
-  const updateUserLocationInFirestore = async (locationData: Location.LocationObject) => {
-    const user = auth.currentUser;
-    if (!user) return;
-
-    try {
-      await updateDoc(doc(db, "users", user.uid), {
-        currentLocation: {
-          lat: locationData.coords.latitude,
-          lng: locationData.coords.longitude,
-          accuracy: locationData.coords.accuracy ?? null, // Convert undefined to null
-          altitude: locationData.coords.altitude ?? null, // Convert undefined to null
-          timestamp: locationData.timestamp,
-        },
-        lastLocationUpdate: new Date().toISOString(),
+      // Get initial location
+      const initialLocation = await Location.getCurrentPositionAsync({
+        accuracy: Location.Accuracy.Balanced,
       });
-    } catch (error) {
-      console.error("Error updating location in Firestore:", error);
-    }
-  };
+      await handleLocationUpdate(initialLocation);
 
-  // Request permissions
-  const requestPermissions = async () => {
-    try {
-      const { status: foregroundStatus } = await Location.requestForegroundPermissionsAsync();
-      
-      if (foregroundStatus !== 'granted') {
-        setPermissionGranted(false);
-        setErrorMsg('Permission to access location was denied');
-        return false;
-      }
-
-      // Request background permissions for continuous tracking
-      if (Platform.OS === 'ios' || Platform.OS === 'android') {
-        const { status: backgroundStatus } = await Location.requestBackgroundPermissionsAsync();
-        if (backgroundStatus !== 'granted') {
-          console.log('Background location permission denied');
-        }
-      }
-
-      setPermissionGranted(true);
-      return true;
-    } catch (error) {
-      setErrorMsg('Error requesting location permissions');
-      console.error(error);
-      return false;
-    }
-  };
-
-  // Start continuous tracking
-  const startTracking = async () => {
-    const hasPermission = await requestPermissions();
-    if (!hasPermission) return;
-
-    try {
-      setIsTracking(true);
-      
-      // Configure location tracking
-      await Location.enableNetworkProviderAsync();
-      
-      // Start watching position
-      locationSubscription.current = await Location.watchPositionAsync(
+      // Watch for location changes
+      watchRef.current = await Location.watchPositionAsync(
         {
-          accuracy: Location.Accuracy.High,
-          timeInterval: trackInterval,
-          distanceInterval: 10, // meters
+          accuracy: Location.Accuracy.Balanced,
+          distanceInterval: 100, // Check every 100 meters
+          timeInterval: 30000,   // Or every 30 seconds
         },
-        (newLocation) => {
-          // Update local state with proper null handling
-          setLocation({
-            latitude: newLocation.coords.latitude,
-            longitude: newLocation.coords.longitude,
-            accuracy: newLocation.coords.accuracy ?? null,
-            altitude: newLocation.coords.altitude ?? null,
-            timestamp: newLocation.timestamp,
-          });
-          
-          // Send location to Firestore
-          updateUserLocationInFirestore(newLocation);
+        async (location) => {
+          await handleLocationUpdate(location);
         }
       );
-    } catch (error) {
-      setErrorMsg('Error starting location tracking');
-      console.error("Location tracking error:", error);
-      setIsTracking(false);
-    }
-  };
+    })();
 
-  // Stop tracking
-  const stopTracking = () => {
-    if (locationSubscription.current) {
-      locationSubscription.current.remove();
-      locationSubscription.current = null;
-    }
-    setIsTracking(false);
-  };
-
-  // Get single current location
-  const getCurrentLocation = async (): Promise<LocationData | null> => {
-    const hasPermission = await requestPermissions();
-    if (!hasPermission) return null;
-
-    try {
-      const currentLocation = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
-      });
-
-      const locationData: LocationData = {
-        latitude: currentLocation.coords.latitude,
-        longitude: currentLocation.coords.longitude,
-        accuracy: currentLocation.coords.accuracy ?? null,
-        altitude: currentLocation.coords.altitude ?? null,
-        timestamp: currentLocation.timestamp,
-      };
-
-      setLocation(locationData);
-      
-      // Send to Firestore
-      await updateUserLocationInFirestore(currentLocation);
-      
-      return locationData;
-    } catch (error) {
-      setErrorMsg('Error getting current location');
-      console.error(error);
-      return null;
-    }
-  };
-
-  // Cleanup on unmount
-  useEffect(() => {
     return () => {
-      stopTracking();
+      active = false;
+      watchRef.current?.remove();
     };
   }, []);
 
-  return {
-    location,
-    errorMsg,
-    permissionGranted,
-    startTracking,
-    stopTracking,
-    getCurrentLocation,
-    isTracking,
+  const handleLocationUpdate = async (location: Location.LocationObject) => {
+    const user = getAuth().currentUser;
+    if (!user) return;
+    
+    setLastLocation(location);
+    
+    const { latitude, longitude } = location.coords;
+    
+    // Save location to Firestore
+    await updateDoc(doc(db, "users", user.uid), {
+      location: {
+        lat: latitude,
+        lng: longitude,
+        updatedAt: new Date(),
+      },
+      lastLatitude: latitude,
+      lastLongitude: longitude,
+      lastLocationUpdate: new Date(),
+    });
+    
+    // Check if user entered any active geofence
+    const enteredGeofences = await GeofencingService.checkUserInActiveGeofences(
+      user.uid,
+      latitude,
+      longitude
+    );
+    
+    // Send notifications for each geofence entered
+    for (const geofence of enteredGeofences) {
+      await GeofencingService.sendGeofenceEntryNotification(
+        user.uid,
+        geofence.caseId,
+        geofence.distance
+      );
+    }
   };
-};
+
+  return { lastLocation };
+}

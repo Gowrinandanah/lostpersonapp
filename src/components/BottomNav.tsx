@@ -22,7 +22,7 @@ const NAV_ITEMS: NavItem[] = [
   { icon: "🔔", label: "Alerts",  route: "/alerts"          },
   { icon: "＋", label: "Report",  route: "/report-missing", center: true },
   { icon: "🗺️", label: "Map",     route: "/map"             },
-  { icon: "👤", label: "Profile", route: "/profile"         },
+  { icon: "📩", label: "Notifications", route: "/notifications" },
 ];
 
 const GREEN = "#2ECC71";

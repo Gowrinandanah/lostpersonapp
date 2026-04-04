@@ -1,46 +1,43 @@
+// app/admin/dashboard.tsx
+
 import React, { useEffect, useState } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
-  ScrollView, ActivityIndicator, Alert,
+  ScrollView, ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { auth } from "../../src/firebase/firebaseConfig";
-import { getAllMissingPersons } from "../../src/firebase/firestoreService";
+import { getAllCasesForAdmin  } from "../../src/firebase/firestoreService";
 import { DocumentData } from "firebase/firestore";
 
-const ADMIN_EMAILS = ["admin@gmail.com"]; // ← replace with your actual email
-
 const G = {
-  primary: "#2ECC71", dark: "#27AE60", light: "#EAFAF1", border: "#D5F5E3",
-  white: "#FFFFFF", bg: "#F7F8FA", text: "#1A1A1A", sub: "#666666",
-  muted: "#AAAAAA", urgent: "#E74C3C", orange: "#E67E22",
+  primary: "#2ECC71",
+  dark: "#27AE60",
+  light: "#EAFAF1",
+  border: "#E5E7EB",
+  white: "#FFFFFF",
+  bg: "#F4F6F8",
+  text: "#111827",
+  sub: "#6B7280",
+  muted: "#9CA3AF",
+  urgent: "#E74C3C",
+  orange: "#F39C12",
 };
 
 export default function AdminDashboard() {
-  const [isAdmin,  setIsAdmin]  = useState(false);
-  const [checking, setChecking] = useState(true);
-  const [cases,    setCases]    = useState<DocumentData[]>([]);
+  const [cases, setCases] = useState<DocumentData[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const user = auth.currentUser;
-    if (!user) { router.replace("/(auth)/login"); return; }
-    if (!ADMIN_EMAILS.includes(user.email ?? "")) {
-      Alert.alert("Access Denied", "You are not an admin.");
-      router.replace("/alerts");
-      return;
-    }
-    setIsAdmin(true);
-    setChecking(false);
+    const unsub = getAllCasesForAdmin ((data) => {
+      setCases(data);
+      setLoading(false);
+    });
+    return () => unsub();
   }, []);
 
-  useEffect(() => {
-    if (!isAdmin) return;
-    const unsub = getAllMissingPersons((data) => setCases(data));
-    return () => unsub();
-  }, [isAdmin]);
-
-  if (checking) {
+  if (loading) {
     return (
       <SafeAreaView style={S.root}>
         <View style={S.center}>
@@ -50,45 +47,49 @@ export default function AdminDashboard() {
     );
   }
 
+  // 📊 Stats
   const total    = cases.length;
   const active   = cases.filter((c) => c.status === "active").length;
-  const pending  = cases.filter((c) => !c.verified && c.status !== "rejected" && c.status !== "resolved").length;
+  const pending  = cases.filter((c) => c.verified === false && c.status !== "rejected").length;
   const resolved = cases.filter((c) => c.status === "resolved").length;
 
-  const StatCard = ({ label, value, color }: { label: string; value: number; color: string }) => (
-    <View style={[S.statCard, { borderLeftColor: color }]}>
+  const StatCard = ({ label, value, color }: any) => (
+    <View style={[S.statCard, { borderTopColor: color }]}>
       <Text style={[S.statValue, { color }]}>{value}</Text>
       <Text style={S.statLabel}>{label}</Text>
     </View>
   );
 
-  const NavCard = ({ icon, title, subtitle, onPress, badge }: {
-    icon: string; title: string; subtitle: string; onPress: () => void; badge?: number;
-  }) => (
+  const NavCard = ({ icon, title, subtitle, onPress, badge }: any) => (
     <TouchableOpacity style={S.navCard} onPress={onPress} activeOpacity={0.85}>
-      <View style={S.navIconWrap}>
-        <Text style={{ fontSize: 26 }}>{icon}</Text>
+      <View style={S.iconWrap}>
+        <Text style={S.icon}>{icon}</Text>
         {!!badge && (
           <View style={S.badge}>
             <Text style={S.badgeText}>{badge}</Text>
           </View>
         )}
       </View>
+
       <View style={{ flex: 1 }}>
         <Text style={S.navTitle}>{title}</Text>
         <Text style={S.navSub}>{subtitle}</Text>
       </View>
-      <Text style={{ color: G.muted, fontSize: 20 }}>›</Text>
+
+      <Text style={S.arrow}>›</Text>
     </TouchableOpacity>
   );
 
   return (
     <SafeAreaView style={S.root}>
+      
+      {/* HEADER */}
       <View style={S.header}>
         <View>
           <Text style={S.headerTitle}>Admin Dashboard</Text>
           <Text style={S.headerSub}>Lost Person Alert</Text>
         </View>
+
         <TouchableOpacity
           style={S.logoutBtn}
           onPress={() => auth.signOut().then(() => router.replace("/(auth)/login"))}
@@ -97,79 +98,196 @@ export default function AdminDashboard() {
         </TouchableOpacity>
       </View>
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+      <ScrollView showsVerticalScrollIndicator={false}>
+
+        {/* OVERVIEW */}
         <Text style={S.sectionTitle}>OVERVIEW</Text>
         <View style={S.statsGrid}>
-          <StatCard label="Total Cases" value={total}    color={G.dark} />
-          <StatCard label="Active"      value={active}   color={G.primary} />
-          <StatCard label="Pending"     value={pending}  color={G.orange} />
-          <StatCard label="Resolved"    value={resolved} color={G.sub} />
+          <StatCard label="Total Cases" value={total} color={G.dark} />
+          <StatCard label="Active" value={active} color={G.primary} />
+          <StatCard label="Pending" value={pending} color={G.orange} />
+          <StatCard label="Resolved" value={resolved} color={G.sub} />
         </View>
 
-        <Text style={S.sectionTitle}>MANAGE</Text>
+        {/* ACTIONS */}
+        <Text style={S.sectionTitle}>ACTIONS</Text>
         <View style={S.navList}>
+
           <NavCard
             icon="📋"
             title="Verify Cases"
-            subtitle="Review and approve submitted reports"
+            subtitle="Review and approve or reject cases"
             badge={pending}
             onPress={() => router.push("/admin/verify-case")}
           />
+
           <NavCard
             icon="👥"
             title="Manage Users"
-            subtitle="View, ban or promote users"
+            subtitle="View users and their activity"
             onPress={() => router.push("/admin/users")}
           />
+
+          <NavCard
+            icon="✅"
+            title="Approved Cases"
+            subtitle="View verified cases & sightings"
+            onPress={() => router.push("/admin/approved-cases")}
+          />
+
         </View>
 
-        <Text style={S.sectionTitle}>RECENT CASES</Text>
-        {cases.slice(0, 5).map((c) => (
-          <View key={c.id} style={S.caseRow}>
-            <View style={[S.statusDot, {
-              backgroundColor:
-                c.status === "active"   ? G.primary :
-                c.status === "resolved" ? G.sub :
-                c.status === "rejected" ? G.urgent : G.orange,
-            }]} />
-            <View style={{ flex: 1 }}>
-              <Text style={S.caseName}>{c.name || "Unknown"}</Text>
-              <Text style={S.caseMeta}>
-                {c.status?.toUpperCase()} · {c.verified ? "✓ Verified" : "⏳ Unverified"}
-              </Text>
-            </View>
-          </View>
-        ))}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 const S = StyleSheet.create({
-  root:        { flex: 1, backgroundColor: G.bg },
-  center:      { flex: 1, alignItems: "center", justifyContent: "center" },
-  header:      { flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: G.dark, paddingHorizontal: 20, paddingVertical: 18 },
-  headerTitle: { fontSize: 20, fontWeight: "800", color: G.white },
-  headerSub:   { fontSize: 12, color: "rgba(255,255,255,0.7)", marginTop: 2 },
-  logoutBtn:   { width: 38, height: 38, borderRadius: 19, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
+  root: {
+    flex: 1,
+    backgroundColor: G.bg,
+  },
 
-  sectionTitle: { fontSize: 11, fontWeight: "800", color: G.sub, letterSpacing: 1.2, paddingHorizontal: 16, marginTop: 22, marginBottom: 10 },
+  center: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
 
-  statsGrid: { flexDirection: "row", flexWrap: "wrap", paddingHorizontal: 12, gap: 10 },
-  statCard:  { flex: 1, minWidth: "44%", backgroundColor: G.white, borderRadius: 12, padding: 14, borderLeftWidth: 4, elevation: 2 },
-  statValue: { fontSize: 28, fontWeight: "900", marginBottom: 4 },
-  statLabel: { fontSize: 12, color: G.sub, fontWeight: "600" },
+  /* HEADER */
+  header: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    backgroundColor: G.dark,
+    paddingHorizontal: 20,
+    paddingVertical: 18,
+  },
 
-  navList:     { paddingHorizontal: 16, gap: 10 },
-  navCard:     { flexDirection: "row", alignItems: "center", backgroundColor: G.white, borderRadius: 14, padding: 16, gap: 14, elevation: 2, borderWidth: 1, borderColor: "#F0F0F0" },
-  navIconWrap: { width: 48, height: 48, borderRadius: 24, backgroundColor: G.light, alignItems: "center", justifyContent: "center" },
-  badge:       { position: "absolute", top: -4, right: -4, backgroundColor: G.urgent, borderRadius: 10, minWidth: 18, height: 18, alignItems: "center", justifyContent: "center", paddingHorizontal: 4 },
-  badgeText:   { color: G.white, fontSize: 10, fontWeight: "800" },
-  navTitle:    { fontSize: 15, fontWeight: "700", color: G.text, marginBottom: 3 },
-  navSub:      { fontSize: 12, color: G.sub },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: "900",
+    color: G.white,
+  },
 
-  caseRow:   { flexDirection: "row", alignItems: "center", backgroundColor: G.white, marginHorizontal: 16, marginBottom: 8, borderRadius: 10, padding: 12, gap: 12, elevation: 1, borderWidth: 1, borderColor: "#F0F0F0" },
-  statusDot: { width: 10, height: 10, borderRadius: 5 },
-  caseName:  { fontSize: 14, fontWeight: "700", color: G.text },
-  caseMeta:  { fontSize: 11, color: G.sub, marginTop: 2 },
+  headerSub: {
+    fontSize: 12,
+    color: "rgba(255,255,255,0.7)",
+    marginTop: 2,
+  },
+
+  logoutBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "rgba(255,255,255,0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  /* SECTION */
+  sectionTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: G.sub,
+    letterSpacing: 1.2,
+    paddingHorizontal: 16,
+    marginTop: 22,
+    marginBottom: 12,
+  },
+
+  /* STATS */
+  statsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    paddingHorizontal: 12,
+    gap: 12,
+  },
+
+  statCard: {
+    flex: 1,
+    minWidth: "45%",
+    backgroundColor: G.white,
+    borderRadius: 14,
+    padding: 16,
+    borderTopWidth: 4,
+    elevation: 3,
+  },
+
+  statValue: {
+    fontSize: 30,
+    fontWeight: "900",
+  },
+
+  statLabel: {
+    fontSize: 12,
+    color: G.sub,
+    marginTop: 4,
+    fontWeight: "600",
+  },
+
+  /* NAV */
+  navList: {
+    paddingHorizontal: 16,
+    gap: 12,
+  },
+
+  navCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: G.white,
+    borderRadius: 16,
+    padding: 16,
+    gap: 14,
+    elevation: 3,
+  },
+
+  iconWrap: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: G.light,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  icon: {
+    fontSize: 24,
+  },
+
+  navTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: G.text,
+  },
+
+  navSub: {
+    fontSize: 12,
+    color: G.sub,
+    marginTop: 2,
+  },
+
+  arrow: {
+    fontSize: 20,
+    color: G.muted,
+  },
+
+  badge: {
+    position: "absolute",
+    top: -5,
+    right: -5,
+    backgroundColor: G.urgent,
+    borderRadius: 10,
+    minWidth: 18,
+    height: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+
+  badgeText: {
+    color: "#fff",
+    fontSize: 10,
+    fontWeight: "900",
+  },
 });

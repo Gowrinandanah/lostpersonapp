@@ -10,41 +10,27 @@
       "com.googleusercontent.apps.389857812215-vdig4mm0b4luri0biam5f5bi5pb0o7ls"
     ],
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.yourname.lostpersonalert",
       "infoPlist": {
-        "UIBackgroundModes": [
-          "location",
-          "fetch"
-        ],
-        "NSLocationWhenInUseUsageDescription": "This app needs your location to show missing persons in your area and help track them.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "This app needs background location to continuously track missing persons and alert you when you are near a case.",
-        "NSLocationAlwaysUsageDescription": "This app needs background location to continuously track missing persons and alert you when you are near a case."
+        "NSLocationWhenInUseUsageDescription": "This app needs your location to show missing persons in your area and help track them."
       }
     },
     "android": {
       "package": "com.yourname.lostpersonalert",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/icon.png"
       },
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
-      "config": {
-        "googleMaps": {
-          "apiKey": "DUMMY_NOT_USED"
-        }
-      },
       "permissions": [
-        "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_BACKGROUND_LOCATION",
-        "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_LOCATION",
         "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.INTERNET"
       ],
       "intentFilters": [
         {
@@ -83,11 +69,19 @@
     "plugins": [
       "expo-router",
       [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#E6F4FE"
+        }
+      ],
+      [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow Lost Person Alert to use your location to track missing persons in your area and alert you when you are near a case.",
-          "locationAlwaysPermission": "Allow Lost Person Alert to use your location in the background to continuously monitor for missing persons near you.",
-          "locationWhenInUsePermission": "Allow Lost Person Alert to use your location to show missing persons in your area on the map."
+          "locationWhenInUsePermission": "Allow Lost Person Alert to use your location to show missing persons in your area.",
+          "locationAlwaysAndWhenInUsePermission": "Allow Lost Person Alert to use your location to show nearby missing persons.",
+          "isAndroidBackgroundLocationEnabled": false,
+          "isIosBackgroundLocationEnabled": false
         }
       ],
       [
@@ -102,7 +96,20 @@
           }
         }
       ],
-      "@react-native-community/datetimepicker"
+      "@react-native-community/datetimepicker",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "newArchEnabled": false,
+            "minSdkVersion": 24
+          },
+          "ios": {
+            "newArchEnabled": false
+          }
+        }
+      ],
+      "@maplibre/maplibre-react-native"
     ],
     "experiments": {
       "typedRoutes": true

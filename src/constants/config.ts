@@ -1,3 +1,4 @@
+//config.ts
 export const Config = {
   firebase: {
     apiKey: "AIzaSyC9t3moE4fuPyag8RJdXzMMzk87Xg1tip4",

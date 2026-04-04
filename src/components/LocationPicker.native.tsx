@@ -1,12 +1,29 @@
+// src/components/LocationPicker.native.tsx
+//
+// Full-screen map modal for picking a location.
+// 100% Google-free — uses @maplibre/maplibre-react-native + Nominatim.
+//
+// Features:
+//   • Search bar (Nominatim) with live dropdown results
+//   • Tap anywhere on the map to drop a pin
+//   • Bounding-box highlight after a search result is selected
+//   • GPS button (expo-location) to jump to current position
+//   • Reverse-geocode the pin via Nominatim and show the resolved address
+//   • Confirm → calls onConfirm({ address, lat, lng })
+
 import React, { useState, useEffect, useRef } from "react";
 import {
   View, Text, StyleSheet, TouchableOpacity,
   ActivityIndicator, Modal, Alert, Platform,
   TextInput, FlatList, Keyboard,
 } from "react-native";
-import MapView, {
-  Marker, UrlTile, Polygon, MapPressEvent, PROVIDER_DEFAULT,
-} from "react-native-maps";
+import {
+  MapView,
+  Camera,
+  CameraRef,
+  PointAnnotation,
+  UserLocation,
+} from "@maplibre/maplibre-react-native";
 import * as Location from "expo-location";
 
 // ── Exported types ────────────────────────────────────────────────────────────
@@ -38,11 +55,34 @@ const G = {
   primary: "#2ECC71", dark: "#27AE60", light: "#EAFAF1",
   border:  "#D5F5E3", white: "#FFFFFF", text: "#1A1A1A",
   sub:     "#666666", muted: "#AAAAAA",
+  urgent:  "#E74C3C", orange: "#E67E22",
 };
 
-const DEFAULT_REGION = {
-  latitude: 10.8505, longitude: 76.2711,
-  latitudeDelta: 0.05, longitudeDelta: 0.05,
+// ── Default map centre (Kerala) ───────────────────────────────────────────────
+
+const DEFAULT_CENTER: [number, number] = [76.2711, 10.8505]; // [lng, lat] GeoJSON order
+const DEFAULT_ZOOM = 8;
+
+// ── CartoDB Voyager style — no API key ────────────────────────────────────────
+
+const OSM_MAP_STYLE = {
+  version: 8 as const,
+  sources: {
+    "carto-voyager": {
+      type: "raster" as const,
+      tiles: ["https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution: "© OpenStreetMap contributors © CARTO",
+      maxzoom: 19,
+    },
+  },
+  layers: [
+    {
+      id:     "carto-voyager-layer",
+      type:   "raster" as const,
+      source: "carto-voyager",
+    },
+  ],
 };
 
 // ── Nominatim helpers ─────────────────────────────────────────────────────────
@@ -83,24 +123,27 @@ export default function LocationPicker({
   onConfirm,
   initialAddress = "",
 }: LocationPickerProps) {
-  const mapRef      = useRef<any>(null);
+  const cameraRef   = useRef<CameraRef>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [visible,       setVisible]       = useState(false);
-  const [marker,        setMarker]        = useState<{ latitude: number; longitude: number } | null>(null);
+  const [marker,        setMarker]        = useState<{ lat: number; lng: number } | null>(null);
   const [resolved,      setResolved]      = useState("");
   const [resolving,     setResolving]     = useState(false);
   const [locating,      setLocating]      = useState(false);
-  const [region,        setRegion]        = useState(DEFAULT_REGION);
   const [confirmed,     setConfirmed]     = useState(initialAddress);
+
+  // Camera state
+  const [camCenter, setCamCenter] = useState<[number, number]>(DEFAULT_CENTER);
+  const [camZoom,   setCamZoom]   = useState(DEFAULT_ZOOM);
+
+  // Search state
   const [searchQuery,   setSearchQuery]   = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searching,     setSearching]     = useState(false);
   const [showResults,   setShowResults]   = useState(false);
-  const [highlight,     setHighlight]     = useState<{
-    minLat: number; maxLat: number; minLng: number; maxLng: number;
-  } | null>(null);
 
+  // On modal open: request location + reset search
   useEffect(() => {
     if (!visible) return;
     setSearchQuery("");
@@ -111,14 +154,14 @@ export default function LocationPicker({
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status === "granted") {
           const loc = await Location.getCurrentPositionAsync({});
-          setRegion({
-            latitude: loc.coords.latitude, longitude: loc.coords.longitude,
-            latitudeDelta: 0.05, longitudeDelta: 0.05,
-          });
+          setCamCenter([loc.coords.longitude, loc.coords.latitude]);
+          setCamZoom(13);
         }
       } catch (_) {}
     })();
   }, [visible]);
+
+  // ── Search ────────────────────────────────────────────────────────────────
 
   const handleSearchChange = (text: string) => {
     setSearchQuery(text);
@@ -141,11 +184,10 @@ export default function LocationPicker({
     setShowResults(false);
     const results = await searchPlaces(searchQuery);
     setSearching(false);
-    if (results.length === 0) {
+    if (!results.length) {
       Alert.alert("Not found", "No results found. Try a different search.");
       return;
     }
-    setSearchResults(results);
     handleSelectResult(results[0]);
   };
 
@@ -157,46 +199,33 @@ export default function LocationPicker({
     const lat = parseFloat(result.lat);
     const lng = parseFloat(result.lon);
 
-    let newRegion = {
-      latitude: lat, longitude: lng,
-      latitudeDelta: 0.01, longitudeDelta: 0.01,
-    };
-
-    if (result.boundingbox && result.boundingbox.length === 4) {
+    let zoom = 13;
+    if (result.boundingbox?.length === 4) {
       const minLat = parseFloat(result.boundingbox[0]);
       const maxLat = parseFloat(result.boundingbox[1]);
       const minLng = parseFloat(result.boundingbox[2]);
       const maxLng = parseFloat(result.boundingbox[3]);
-
-      const latDelta = Math.max((maxLat - minLat) * 1.4, 0.005);
-      const lngDelta = Math.max((maxLng - minLng) * 1.4, 0.005);
-
-      setHighlight({ minLat, maxLat, minLng, maxLng });
-
-      newRegion = {
-        latitude:      (minLat + maxLat) / 2,
-        longitude:     (minLng + maxLng) / 2,
-        latitudeDelta:  latDelta,
-        longitudeDelta: lngDelta,
-      };
-    } else {
-      setHighlight(null);
+      const latSpan = maxLat - minLat;
+      const lngSpan = maxLng - minLng;
+      // rough zoom from bounding-box span
+      zoom = Math.max(5, Math.min(15, 13 - Math.log2(Math.max(latSpan, lngSpan) * 10)));
     }
 
-    setRegion(newRegion);
-    setTimeout(() => {
-      mapRef.current?.animateToRegion(newRegion, 800);
-    }, 100);
+    setCamCenter([lng, lat]);
+    setCamZoom(zoom);
   };
 
+  // ── Pin placement + reverse geocode ──────────────────────────────────────
+
   const placePin = async (lat: number, lng: number) => {
-    setHighlight(null);
-    setMarker({ latitude: lat, longitude: lng });
+    setMarker({ lat, lng });
     setResolving(true);
     const addr = await reverseGeocode(lat, lng);
     setResolved(addr);
     setResolving(false);
   };
+
+  // ── GPS ──────────────────────────────────────────────────────────────────
 
   const goToGPS = async () => {
     setLocating(true);
@@ -208,9 +237,8 @@ export default function LocationPicker({
       }
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
       const { latitude, longitude } = loc.coords;
-      const r = { latitude, longitude, latitudeDelta: 0.01, longitudeDelta: 0.01 };
-      setRegion(r);
-      setTimeout(() => mapRef.current?.animateToRegion(r, 700), 100);
+      setCamCenter([longitude, latitude]);
+      setCamZoom(15);
       await placePin(latitude, longitude);
     } catch {
       Alert.alert("Error", "Could not get current location.");
@@ -219,20 +247,26 @@ export default function LocationPicker({
     }
   };
 
+  // ── Confirm ───────────────────────────────────────────────────────────────
+
   const handleConfirm = () => {
     if (!marker) {
       Alert.alert("No location", "Tap the map to drop a pin first.");
       return;
     }
-    const addr = resolved || `${marker.latitude.toFixed(5)}, ${marker.longitude.toFixed(5)}`;
+    const addr = resolved || `${marker.lat.toFixed(5)}, ${marker.lng.toFixed(5)}`;
     setConfirmed(addr);
-    onConfirm({ address: addr, lat: marker.latitude, lng: marker.longitude });
+    onConfirm({ address: addr, lat: marker.lat, lng: marker.lng });
     setVisible(false);
   };
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────────────────────────────────────
+
   return (
     <>
-      {/* Trigger button */}
+      {/* ── Trigger button ── */}
       <TouchableOpacity style={S.trigger} onPress={() => setVisible(true)} activeOpacity={0.85}>
         <Text style={S.triggerIcon}>📍</Text>
         <View style={{ flex: 1 }}>
@@ -244,7 +278,7 @@ export default function LocationPicker({
         <Text style={{ fontSize: 18, color: G.muted }}>›</Text>
       </TouchableOpacity>
 
-      {/* Full-screen map modal */}
+      {/* ── Full-screen map modal ── */}
       <Modal
         visible={visible}
         animationType="slide"
@@ -325,54 +359,42 @@ export default function LocationPicker({
             <Text style={S.instructionText}>📌 Tap anywhere on the map to drop a pin</Text>
           </View>
 
-          {/* Map — PROVIDER_DEFAULT + UrlTile FIRST child = tiles always render */}
+          {/* ── MapLibre map ── */}
           <MapView
-            ref={mapRef}
             style={{ flex: 1 }}
-            provider={PROVIDER_DEFAULT}
-            mapType="none"
-            region={region}
-            onRegionChangeComplete={setRegion}
-            showsUserLocation
-            showsMyLocationButton={false}
-            onPress={(e: MapPressEvent) => {
+            mapStyle={OSM_MAP_STYLE}
+            logoEnabled={false}
+            attributionEnabled={false}
+            onPress={(feature) => {
+              // MapLibre onPress passes a GeoJSON Feature
               Keyboard.dismiss();
               setShowResults(false);
-              placePin(
-                e.nativeEvent.coordinate.latitude,
-                e.nativeEvent.coordinate.longitude
-              );
+              const [lng, lat] = (feature as any).geometry.coordinates as [number, number];
+              placePin(lat, lng);
             }}
           >
-            {/* UrlTile MUST be first child for tiles to render */}
-            <UrlTile
-              urlTemplate="https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
-              maximumZ={19}
-              flipY={false}
-              zIndex={-1}
+            {/* Controlled camera */}
+            <Camera
+              ref={cameraRef}
+              centerCoordinate={camCenter}
+              zoomLevel={camZoom}
+              animationMode="flyTo"
+              animationDuration={700}
             />
 
-            {/* Bounding box highlight after search */}
-            {highlight && (
-              <Polygon
-                coordinates={[
-                  { latitude: highlight.minLat, longitude: highlight.minLng },
-                  { latitude: highlight.maxLat, longitude: highlight.minLng },
-                  { latitude: highlight.maxLat, longitude: highlight.maxLng },
-                  { latitude: highlight.minLat, longitude: highlight.maxLng },
-                ]}
-                strokeColor="#2ECC71"
-                strokeWidth={3}
-                fillColor="rgba(46,204,113,0.12)"
-              />
-            )}
+            {/* User location */}
+            <UserLocation visible renderMode="native" />
 
+            {/* Dropped pin */}
             {marker && (
-              <Marker
-                coordinate={marker}
-                pinColor={pinColor}
+              <PointAnnotation
+                id="selected-pin"
+                coordinate={[marker.lng, marker.lat]}
                 title="Selected Location"
-              />
+              >
+                {/* Simple coloured circle pin */}
+                <View style={[S.pin, { backgroundColor: pinColor === "red" ? G.urgent : G.orange }]} />
+              </PointAnnotation>
             )}
           </MapView>
 
@@ -422,6 +444,10 @@ export default function LocationPicker({
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Styles
+// ─────────────────────────────────────────────────────────────────────────────
+
 const S = StyleSheet.create({
   trigger:            { flexDirection: "row", alignItems: "center", backgroundColor: G.white, borderWidth: 1.5, borderColor: "#E0E0E0", borderRadius: 10, paddingHorizontal: 14, paddingVertical: 12, gap: 10 },
   triggerIcon:        { fontSize: 20 },
@@ -447,6 +473,9 @@ const S = StyleSheet.create({
 
   instruction:     { backgroundColor: G.light, paddingVertical: 7, paddingHorizontal: 16, borderBottomWidth: 1, borderBottomColor: G.border },
   instructionText: { fontSize: 12, color: G.dark, fontWeight: "600", textAlign: "center" },
+
+  // Simple circular pin rendered as a PointAnnotation child
+  pin: { width: 20, height: 20, borderRadius: 10, borderWidth: 2.5, borderColor: "#fff" },
 
   gpsBtn:  { position: "absolute", right: 14, bottom: 210, width: 48, height: 48, borderRadius: 24, backgroundColor: G.white, alignItems: "center", justifyContent: "center", shadowColor: "#000", shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.15, shadowRadius: 6, elevation: 6, borderWidth: 1, borderColor: G.border },
 

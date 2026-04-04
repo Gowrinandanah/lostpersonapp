@@ -180,12 +180,18 @@ export default function HomeScreen() {
   const firstName = user?.displayName?.split(" ")[0] || "Citizen";
 
   useEffect(() => {
-    const unsub = getMissingPersons((data) => {
-      setCases(data as MissingPerson[]);
-      setLoading(false);
-    });
-    return () => unsub();
-  }, []);
+  const unsub = getMissingPersons((data) => {
+    // ✅ FILTER ONLY VERIFIED CASES
+    const approvedCases = (data as MissingPerson[]).filter(
+      (item: any) => item.verified === true
+    );
+
+    setCases(approvedCases);
+    setLoading(false);
+  });
+
+  return () => unsub();
+}, []);
 
   const recentCases  = cases.slice(0, 4);
   const urgentCount  = cases.filter(isUrgent).length;

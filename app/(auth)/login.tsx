@@ -1,3 +1,4 @@
+// app/(auth)/login.tsx
 import React, { useState, useEffect } from "react";
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
@@ -9,7 +10,8 @@ import {
   signInWithEmailAndPassword,
   sendEmailVerification,
 } from "firebase/auth";
-import { auth } from "../../src/firebase/firebaseConfig";
+import { auth,db } from "../../src/firebase/firebaseConfig";
+import { doc, getDoc } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 import {
@@ -17,8 +19,6 @@ import {
   handleGoogleSignInResponse,
 } from "../../src/services/googleAuthService";
 
-
-const ADMIN_EMAILS = ["admin@gmail.com"];
 
 const G = {
   primary: "#2ECC71", dark: "#27AE60", white: "#FFFFFF",
@@ -41,7 +41,7 @@ export default function LoginScreen() {
       setGoogleLoading(true);
       handleGoogleSignInResponse(
         response,
-        () => { setGoogleLoading(false); router.replace("/alerts"); },
+        () => { setGoogleLoading(false); router.replace("/"); },
         (errorMessage) => { setGoogleLoading(false); Alert.alert("Google Sign-In Failed", errorMessage); }
       );
     }
@@ -52,14 +52,17 @@ export default function LoginScreen() {
       Alert.alert("Missing fields", "Please enter your email and password.");
       return;
     }
+
     setLoading(true);
     try {
       const { user } = await signInWithEmailAndPassword(auth, email.trim(), password);
 
-      // Admin accounts skip email verification check
-      const isAdmin = ADMIN_EMAILS.includes((user.email ?? "").toLowerCase());
+     const userRef = doc(db, "users", user.uid);
+     const userSnap = await getDoc(userRef);
+     const role = userSnap.data()?.role;
 
-      if (!isAdmin && !user.emailVerified) {
+      
+      if (role!=="admin" && !user.emailVerified) {
         await auth.signOut();
         Alert.alert(
           "Email not verified",
@@ -84,22 +87,26 @@ export default function LoginScreen() {
         return;
       }
 
-      // ── Redirect based on role ──────────────────────────────────────────
-      if (isAdmin) {
-  setTimeout(() => {
-    router.replace("/admin/dashboard");
-  }, 300); // small delay fixes mobile issue
+      // Redirect based on role
+     
+
+if (role === "admin") {
+  router.replace("/admin/dashboard");
 } else {
   router.replace("/alerts");
 }
 
+
+
+
+      
     } catch (e: any) {
       const msg =
-        e.code === "auth/invalid-credential"  ? "Incorrect email or password."         :
-        e.code === "auth/user-not-found"       ? "No account found with this email."    :
-        e.code === "auth/wrong-password"       ? "Incorrect password."                  :
-        e.code === "auth/too-many-requests"    ? "Too many attempts. Try again later."  :
-        e.code === "auth/invalid-email"        ? "Invalid email address."               :
+        e.code === "auth/invalid-credential"  ? "Incorrect email or password."        :
+        e.code === "auth/user-not-found"       ? "No account found with this email."   :
+        e.code === "auth/wrong-password"       ? "Incorrect password."                 :
+        e.code === "auth/too-many-requests"    ? "Too many attempts. Try again later." :
+        e.code === "auth/invalid-email"        ? "Invalid email address."              :
         "Sign in failed. Check your connection.";
       Alert.alert("Sign In Failed", msg);
     } finally {
@@ -186,7 +193,7 @@ export default function LoginScreen() {
               </View>
 
               <TouchableOpacity onPress={() => router.push("/(auth)/forgot-password")} style={S.forgotWrap} disabled={loading || googleLoading}>
-                <Text style={S.forgotText}></Text>
+                <Text style={S.forgotText}>Forgot password?</Text>
               </TouchableOpacity>
 
               <TouchableOpacity

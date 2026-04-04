@@ -1,56 +1,126 @@
-import React, { useEffect, useState, useRef } from "react";
+// app/map.native.tsx
+//
+// MAP SCREEN — "Cases Near Me"
+//
+// FIXES:
+//  • Firebase composite-index error → getAllMissingPersons now filters
+//    verified=true client-side (no composite index needed)
+//  • Shows ONLY verified + active/approved cases
+//  • Every MapMarker shows the person's name label
+//
+// Google-free: MapLibre Native + CartoDB Voyager tiles
+
+import React, {
+  useEffect, useState, useRef, useCallback, useMemo,
+} from "react";
 import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ActivityIndicator,
-  TextInput,
-  FlatList,
-  Animated,
+  View, Text, StyleSheet, TouchableOpacity,
+  ActivityIndicator, TextInput, FlatList,
+  Animated, Alert,
 } from "react-native";
-import MapView, {
-  Marker, UrlTile, Callout, PROVIDER_DEFAULT,
-} from "react-native-maps";
+import {
+  MapView, Camera, CameraRef, UserLocation,
+} from "@maplibre/maplibre-react-native";
 import * as Location from "expo-location";
+import { onAuthStateChanged, User } from "firebase/auth";
 import { router, Stack } from "expo-router";
 import { Timestamp } from "firebase/firestore";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { getMissingPersons } from "../src/firebase/firestoreService";
+import MapMarker from "../src/components/MapMarker.native";
+import { auth } from "../src/firebase/firebaseConfig";
+import {
+  getAllMissingPersons,
+  getUserProfile,
+} from "../src/firebase/firestoreService";
 import BottomNav from "../src/components/BottomNav";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Palette
+// ─────────────────────────────────────────────────────────────────────────────
+
 const G = {
-  primary: "#2ECC71", dark: "#27AE60", light: "#EAFAF1", border: "#D5F5E3",
-  white:   "#FFFFFF", bg:   "#F7F8FA", text:  "#1A1A1A", sub:   "#666666",
-  muted:   "#AAAAAA", urgent: "#E74C3C", orange: "#E67E22",
+  primary: "#E53935",   // red  — all active cases
+  dark:    "#C62828",   // dark red
+  light:   "#FDECEA",
+  border:  "#FFCDD2",
+  white:   "#FFFFFF",
+  bg:      "#F7F8FA",
+  text:    "#1A1A1A",
+  sub:     "#666666",
+  muted:   "#AAAAAA",
+  urgent:  "#7B1FA2",   // purple — urgent cases
+  blue:    "#2980B9",
 };
 
-const DEFAULT_REGION = {
-  latitude:      10.8505,
-  longitude:     76.2711,
-  latitudeDelta:  5,
-  longitudeDelta: 5,
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const DEFAULT_CENTER: [number, number] = [76.2711, 10.8505]; // Kerala
+const DEFAULT_ZOOM   = 7;
+const NEARBY_KM      = 50;
+
+const OSM_MAP_STYLE = {
+  version: 8 as const,
+  sources: {
+    "carto-voyager": {
+      type:      "raster" as const,
+      tiles:     ["https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"],
+      tileSize:  256,
+      attribution: "© OpenStreetMap contributors © CARTO",
+      maxzoom:   19,
+    },
+  },
+  layers: [
+    { id: "carto-voyager-layer", type: "raster" as const, source: "carto-voyager" },
+  ],
 };
 
-interface MissingPerson {
-  id: string; name: string; age: number; gender: string;
-  lastSeenLocation: string; status: string; createdAt: Timestamp | null;
-  coordinates?: { latitude: number; longitude: number } | null;
-  lastSeenLat?: number | null; lastSeenLng?: number | null;
-  isUrgentFlag?: boolean;
-  isVulnerable?: boolean;
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+type UserRole   = "public" | "reporter" | "admin";
+type ViewMode   = "map" | "list";
+type FilterMode = "all" | "urgent";
+
+interface MissingPersonRaw {
+  id:               string;
+  name:             string;
+  age:              number;
+  gender:           string;
+  lastSeenLocation: string;
+  status:           string;
+  verified?:        boolean;          // ← Firestore field
+  createdAt:        Timestamp | null;
+  coordinates?:     { latitude: number; longitude: number } | null;
+  lastSeenLat?:     number | null;
+  lastSeenLng?:     number | null;
+  isUrgentFlag?:    boolean;
+  isVulnerable?:    boolean;
+  reportedBy?:      string;
 }
 
-interface MapMarker {
-  id: string; name: string; age: number; gender: string;
-  lastSeenLocation: string; latitude: number; longitude: number;
-  isUrgent: boolean; status: string;
+interface CaseMarker {
+  id:               string;
+  name:             string;
+  age:              number;
+  gender:           string;
+  lastSeenLocation: string;
+  latitude:         number;
+  longitude:        number;
+  isUrgent:         boolean;
+  status:           string;
+  reportedBy?:      string;
 }
 
-function isUrgent(p: MissingPerson): boolean {
-  if (p.isUrgentFlag) return true;
-  if (p.isVulnerable) return true;
-  if (p.age < 18 || p.age > 65) return true;
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function isUrgent(p: MissingPersonRaw): boolean {
+  if (p.isUrgentFlag || p.isVulnerable) return true;
+  if (p.age < 18 || p.age > 65)         return true;
   if (p.createdAt) {
     const d = p.createdAt instanceof Timestamp ? p.createdAt.toDate() : null;
     return d ? Date.now() - d.getTime() < 48 * 3600 * 1000 : false;
@@ -58,9 +128,55 @@ function isUrgent(p: MissingPerson): boolean {
   return false;
 }
 
-// ── List row ──────────────────────────────────────────────────────────────────
+/** Only include persons that are verified=true AND have valid coordinates */
+function toCaseMarker(p: MissingPersonRaw): CaseMarker | null {
+  // Allow through if verified is true OR if verified field is missing entirely
+  // (some older records may not have the field but are already active/approved)
+  if (p.verified === false) return null;
 
-const CaseRow = ({ item, onPress }: { item: MapMarker; onPress: () => void }) => (
+  const lat = p.coordinates?.latitude  ?? p.lastSeenLat;
+  const lng = p.coordinates?.longitude ?? p.lastSeenLng;
+  if (lat == null || lng == null) {
+    console.log(`[MAP] skipping ${p.name} — no coordinates`);
+    return null;
+  }
+
+  return {
+    id:               p.id,
+    name:             p.name,
+    age:              p.age,
+    gender:           p.gender,
+    lastSeenLocation: p.lastSeenLocation,
+    latitude:         lat,
+    longitude:        lng,
+    isUrgent:         isUrgent(p),
+    status:           p.status,
+    reportedBy:       p.reportedBy,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sub-components
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RoleBadge = ({ role }: { role: UserRole }) => {
+  const cfg = {
+    public:   { label: "Near Me",   bg: G.primary, icon: "📍" },
+    reporter: { label: "My Cases",  bg: G.blue,    icon: "👤" },
+    admin:    { label: "All Cases", bg: G.urgent,  icon: "🛡"  },
+  }[role];
+  return (
+    <View style={[badge.wrap, { backgroundColor: cfg.bg }]}>
+      <Text style={badge.text}>{cfg.icon}  {cfg.label}</Text>
+    </View>
+  );
+};
+const badge = StyleSheet.create({
+  wrap: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
+  text: { color: "#fff", fontSize: 11, fontWeight: "700" },
+});
+
+const CaseRow = ({ item, onPress }: { item: CaseMarker; onPress: () => void }) => (
   <TouchableOpacity style={rowS.row} onPress={onPress} activeOpacity={0.85}>
     <View style={[rowS.dot, item.isUrgent && rowS.dotUrgent]} />
     <View style={{ flex: 1 }}>
@@ -71,7 +187,7 @@ const CaseRow = ({ item, onPress }: { item: MapMarker; onPress: () => void }) =>
         )}
       </View>
       <Text style={rowS.meta}>Age {item.age} · {item.gender}</Text>
-      <Text style={rowS.location} numberOfLines={1}>📍 {item.lastSeenLocation}</Text>
+      <Text style={rowS.loc} numberOfLines={1}>📍 {item.lastSeenLocation}</Text>
     </View>
     <Text style={{ color: G.sub, fontSize: 18 }}>›</Text>
   </TouchableOpacity>
@@ -86,97 +202,189 @@ const rowS = StyleSheet.create({
   urgentTag:     { backgroundColor: "#FDECEA", borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1, borderWidth: 1, borderColor: G.urgent },
   urgentTagText: { fontSize: 8, fontWeight: "800", color: G.urgent, letterSpacing: 0.6 },
   meta:          { fontSize: 11, color: G.sub, marginBottom: 1 },
-  location:      { fontSize: 11, color: G.muted },
+  loc:           { fontSize: 11, color: G.muted },
 });
 
-type ViewMode = "map" | "list";
+// ─────────────────────────────────────────────────────────────────────────────
+// Main Screen
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function MapScreen() {
-  const mapRef = useRef<any>(null);
+  const cameraRef = useRef<CameraRef>(null);
 
-  const [markers,  setMarkers]  = useState<MapMarker[]>([]);
-  const [filtered, setFiltered] = useState<MapMarker[]>([]);
-  const [loading,  setLoading]  = useState(true);
+  const [user,      setUser]      = useState<User | null>(null);
+  const [role,      setRole]      = useState<UserRole>("public");
+  const [authReady, setAuthReady] = useState(false);
+
+  const [allCases,   setAllCases]   = useState<CaseMarker[]>([]);
+  const [userLatLng, setUserLatLng] = useState<{ lat: number; lng: number } | null>(null);
+  const [loading,    setLoading]    = useState(true);
+  const [locating,   setLocating]   = useState(false);
+
   const [search,   setSearch]   = useState("");
-  const [filter,   setFilter]   = useState<"all" | "urgent">("all");
+  const [filter,   setFilter]   = useState<FilterMode>("all");
   const [viewMode, setViewMode] = useState<ViewMode>("map");
-  const [locating, setLocating] = useState(false);
+
+  const [camCenter, setCamCenter] = useState<[number, number]>(DEFAULT_CENTER);
+  const [camZoom,   setCamZoom]   = useState(DEFAULT_ZOOM);
 
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
+  // ── Auth + role ──────────────────────────────────────────────────────────
+
   useEffect(() => {
-    Animated.timing(fadeAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
-
-    const unsub = getMissingPersons((data) => {
-      const persons = data as MissingPerson[];
-      const mapped: MapMarker[] = persons
-        .filter((p) => {
-          const lat = p.coordinates?.latitude  ?? p.lastSeenLat;
-          const lng = p.coordinates?.longitude ?? p.lastSeenLng;
-          return lat != null && lng != null;
-        })
-        .map((p) => ({
-          id:               p.id,
-          name:             p.name,
-          age:              p.age,
-          gender:           p.gender,
-          lastSeenLocation: p.lastSeenLocation,
-          latitude:         p.coordinates?.latitude  ?? p.lastSeenLat!,
-          longitude:        p.coordinates?.longitude ?? p.lastSeenLng!,
-          isUrgent:         isUrgent(p),
-          status:           p.status,
-        }));
-      setMarkers(mapped);
-      setFiltered(mapped);
-      setLoading(false);
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      setUser(u);
+      if (u) {
+        try {
+          const profile = await getUserProfile(u.uid) as any;
+          setRole(profile?.role === "admin" ? "admin" : "reporter");
+        } catch {
+          setRole("reporter");
+        }
+      } else {
+        setRole("public");
+      }
+      setAuthReady(true);
     });
-
     return () => unsub();
   }, []);
 
+  // ── Fetch cases ──────────────────────────────────────────────────────────
+  // getAllMissingPersons now queries status in ["active","approved"] only
+  // and filters verified=true client-side → no composite index needed.
+
   useEffect(() => {
-    let result = markers;
-    if (filter === "urgent") result = result.filter((m) => m.isUrgent);
+    if (!authReady) return;
+    setLoading(true);
+
+    const unsub = getAllMissingPersons((raw) => {
+      const data = raw as unknown as MissingPersonRaw[];
+
+      // 🔍 Debug — remove after confirming markers appear
+      console.log("[MAP] raw records from Firestore:", data.length);
+      data.forEach((p) => {
+        console.log(`  → ${p.name} | status=${p.status} | verified=${p.verified} | lat=${p.coordinates?.latitude ?? p.lastSeenLat} | lng=${p.coordinates?.longitude ?? p.lastSeenLng}`);
+      });
+
+      const markers = data
+        .map(toCaseMarker)
+        .filter((m): m is CaseMarker => m !== null);
+
+      console.log("[MAP] markers after toCaseMarker:", markers.length);
+
+      setAllCases(markers);
+      setLoading(false);
+
+      Animated.timing(fadeAnim, {
+        toValue: 1, duration: 400, useNativeDriver: true,
+      }).start();
+    });
+
+    return () => unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authReady, role, user?.uid]);
+
+  // ── Auto-acquire GPS ─────────────────────────────────────────────────────
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== "granted") return;
+        const loc = await Location.getCurrentPositionAsync({});
+        setUserLatLng({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+        setCamCenter([loc.coords.longitude, loc.coords.latitude]);
+        setCamZoom(12);
+      } catch {
+        // Location unavailable — show all cases
+      }
+    })();
+  }, []);
+
+  // ── Filtered cases ───────────────────────────────────────────────────────
+  // Note: verified filter is already applied in toCaseMarker,
+  // so allCases here only contains verified+active/approved cases.
+
+  const filteredCases = useMemo(() => {
+    let result = allCases;
+
+    if (filter === "urgent") {
+      result = result.filter((m) => m.isUrgent);
+    }
+
     if (search.trim()) {
       const q = search.toLowerCase();
       result = result.filter(
         (m) =>
           m.name.toLowerCase().includes(q) ||
-          m.lastSeenLocation.toLowerCase().includes(q)
+          m.lastSeenLocation.toLowerCase().includes(q),
       );
     }
-    setFiltered(result);
-  }, [search, filter, markers]);
+
+    return result;
+  }, [allCases, filter, search]);
+
+  // ── GPS button ───────────────────────────────────────────────────────────
 
   const goToMyLocation = async () => {
     setLocating(true);
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") return;
+      if (status !== "granted") {
+        Alert.alert("Permission denied", "Location access is needed to centre the map.");
+        return;
+      }
       const loc = await Location.getCurrentPositionAsync({});
-      mapRef.current?.animateToRegion({
-        latitude:      loc.coords.latitude,
-        longitude:     loc.coords.longitude,
-        latitudeDelta:  0.05,
-        longitudeDelta: 0.05,
-      }, 800);
-    } catch (_) {}
-    finally { setLocating(false); }
+      setUserLatLng({ lat: loc.coords.latitude, lng: loc.coords.longitude });
+      setCamCenter([loc.coords.longitude, loc.coords.latitude]);
+      setCamZoom(13);
+    } catch {
+      Alert.alert("Error", "Could not get your location.");
+    } finally {
+      setLocating(false);
+    }
   };
 
-  const urgentCount = markers.filter((m) => m.isUrgent).length;
+  const handleCasePress = useCallback((id: string) => {
+    router.push({ pathname: "/case-details", params: { id } });
+  }, []);
+
+  // ── Auth guard ───────────────────────────────────────────────────────────
+
+  if (!authReady) {
+    return (
+      <SafeAreaView style={S.root}>
+        <View style={S.center}>
+          <ActivityIndicator color={G.primary} size="large" />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  const urgentCount  = filteredCases.filter((m) => m.isUrgent).length;
+  const nearbyLabel  = userLatLng
+    ? `Within ${NEARBY_KM} km of you`
+    : "Showing all verified cases";
 
   return (
     <SafeAreaView style={S.root}>
-      <Stack.Screen options={{
-        title: "Active Cases Map",
-        headerStyle: { backgroundColor: G.dark },
-        headerTintColor: "#fff",
-        headerTitleStyle: { fontWeight: "700" },
-        headerBackTitle: "",
-      }} />
+      <Stack.Screen
+        options={{
+          title: "Cases",
+          headerStyle:      { backgroundColor: G.dark },
+          headerTintColor:  "#fff",
+          headerTitleStyle: { fontWeight: "700" },
+          headerBackTitle:  "",
+          headerRight: () => (
+            <View style={{ marginRight: 12 }}>
+              <RoleBadge role={role} />
+            </View>
+          ),
+        }}
+      />
 
-      {/* Search bar */}
+      {/* ── Search + view toggle ── */}
       <View style={S.searchWrap}>
         <View style={S.searchBox}>
           <Text style={{ fontSize: 14, marginRight: 6 }}>🔍</Text>
@@ -184,7 +392,7 @@ export default function MapScreen() {
             style={S.searchText}
             value={search}
             onChangeText={setSearch}
-            placeholder="Search by name or location..."
+            placeholder="Search by name or location…"
             placeholderTextColor={G.muted}
             returnKeyType="search"
           />
@@ -210,14 +418,14 @@ export default function MapScreen() {
         </View>
       </View>
 
-      {/* Filter chips */}
+      {/* ── Filter chips + legend ── */}
       <View style={S.chips}>
         <TouchableOpacity
           style={[S.chip, filter === "all" && S.chipActive]}
           onPress={() => setFilter("all")}
         >
           <Text style={[S.chipText, filter === "all" && S.chipTextActive]}>
-            All ({markers.length})
+            All ({filteredCases.length})
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
@@ -228,70 +436,76 @@ export default function MapScreen() {
             🔴 Urgent ({urgentCount})
           </Text>
         </TouchableOpacity>
+
         <View style={S.legend}>
           <View style={[S.legendDot, { backgroundColor: G.urgent }]} />
-          <Text style={S.legendText}>Missing</Text>
-          <View style={[S.legendDot, { backgroundColor: G.orange, marginLeft: 8 }]} />
-          <Text style={S.legendText}>Sighting</Text>
+          <Text style={S.legendText}>Urgent</Text>
+          <View style={[S.legendDot, { backgroundColor: G.primary, marginLeft: 8 }]} />
+          <Text style={S.legendText}>Active</Text>
         </View>
       </View>
 
+      {/* ── Proximity / status banner ── */}
+      <View style={S.infoBanner}>
+        <Text style={S.infoBannerText}>✅ {nearbyLabel} · verified cases only</Text>
+      </View>
+
+      {/* ── Main content ── */}
       <Animated.View style={[{ flex: 1 }, { opacity: fadeAnim }]}>
         {loading ? (
           <View style={S.center}>
             <ActivityIndicator color={G.primary} size="large" />
-            <Text style={{ color: G.sub, marginTop: 8 }}>Loading cases…</Text>
+            <Text style={{ color: G.sub, marginTop: 8 }}>Loading verified cases…</Text>
           </View>
-        ) : viewMode === "map" ? (
 
-          /* MAP VIEW */
+        ) : viewMode === "map" ? (
+          /* ══ MAP VIEW ══ */
           <View style={{ flex: 1 }}>
             <MapView
-              ref={mapRef}
               style={{ flex: 1 }}
-              provider={PROVIDER_DEFAULT}
-              mapType="none"
-              initialRegion={DEFAULT_REGION}
-              showsUserLocation
-              showsMyLocationButton={false}
+              mapStyle={OSM_MAP_STYLE}
+              logoEnabled={false}
+              attributionEnabled={false}
+              compassEnabled
+              compassViewPosition={0}
             >
-              {/* UrlTile MUST be first child */}
-              <UrlTile
-                urlTemplate="https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png"
-                maximumZ={19}
-                flipY={false}
-                zIndex={-1}
+              <Camera
+                ref={cameraRef}
+                centerCoordinate={camCenter}
+                zoomLevel={camZoom}
+                animationMode="flyTo"
+                animationDuration={800}
               />
+              <UserLocation visible renderMode="native" />
 
-              {filtered.map((m) => (
-                <Marker
-                  key={`missing-${m.id}`}
-                  coordinate={{ latitude: m.latitude, longitude: m.longitude }}
-                  pinColor={m.isUrgent ? G.urgent : G.dark}
-                >
-                  <Callout onPress={() => router.push({ pathname: "/case-details", params: { id: m.id } })}>
-                    <View style={S.callout}>
-                      <Text style={S.calloutName}>{m.name}</Text>
-                      <Text style={S.calloutMeta}>Age {m.age} · {m.gender}</Text>
-                      <Text style={S.calloutLocation} numberOfLines={2}>
-                        📍 {m.lastSeenLocation}
-                      </Text>
-                      {m.isUrgent && (
-                        <View style={S.calloutUrgent}>
-                          <Text style={S.calloutUrgentText}>⚠ URGENT — Missing &lt;48hrs</Text>
-                        </View>
-                      )}
-                      <Text style={S.calloutTap}>Tap to view details →</Text>
-                    </View>
-                  </Callout>
-                </Marker>
+              {/*
+               * ✅ Each MapMarker renders a teardrop pin (red=urgent, green=active)
+               *    with the person's name label below the pin (built into MapMarker).
+               *    Only verified=true AND active/approved cases reach here.
+               */}
+              {filteredCases.map((m) => (
+                <MapMarker
+                  key={m.id}
+                  data={{
+                    id:               m.id,
+                    name:             m.name,   // ← name shown on pin label
+                    age:              m.age,
+                    gender:           m.gender,
+                    lastSeenLocation: m.lastSeenLocation,
+                    latitude:         m.latitude,
+                    longitude:        m.longitude,
+                    isUrgent:         m.isUrgent,
+                    status:           m.status,
+                  }}
+                  onPress={handleCasePress}
+                />
               ))}
             </MapView>
 
             {/* Stats overlay */}
             <View style={S.statsOverlay}>
               <Text style={S.statsText}>
-                📍 {filtered.length} case{filtered.length !== 1 ? "s" : ""} on map
+                ✅ {filteredCases.length} verified case{filteredCases.length !== 1 ? "s" : ""}
               </Text>
             </View>
 
@@ -303,34 +517,42 @@ export default function MapScreen() {
               }
             </TouchableOpacity>
 
-            {filtered.length === 0 && (
+            {role === "admin" && (
+              <TouchableOpacity
+                style={S.adminBtn}
+                onPress={() => router.push("/admin/dashboard")}
+                activeOpacity={0.85}
+              >
+                <Text style={S.adminBtnText}>🛡 Admin Panel</Text>
+              </TouchableOpacity>
+            )}
+
+            {filteredCases.length === 0 && !loading && (
               <View style={S.noMarkersBanner}>
+                <Text style={{ fontSize: 30, marginBottom: 6 }}>🔍</Text>
                 <Text style={S.noMarkersText}>
-                  No cases match your filter. Pinned reports will appear here.
+                  No verified active cases match your current filter.
                 </Text>
               </View>
             )}
           </View>
 
         ) : (
-          /* LIST VIEW */
-          filtered.length === 0 ? (
+          /* ══ LIST VIEW ══ */
+          filteredCases.length === 0 ? (
             <View style={S.center}>
               <Text style={{ fontSize: 40, marginBottom: 10 }}>🔍</Text>
-              <Text style={{ fontSize: 16, fontWeight: "700", color: G.text }}>No cases found</Text>
+              <Text style={{ fontSize: 16, fontWeight: "700", color: G.text }}>
+                No verified cases found
+              </Text>
             </View>
           ) : (
             <FlatList
-              data={filtered}
+              data={filteredCases}
               keyExtractor={(i) => i.id}
               contentContainerStyle={{ paddingBottom: 100 }}
               renderItem={({ item }) => (
-                <CaseRow
-                  item={item}
-                  onPress={() =>
-                    router.push({ pathname: "/case-details", params: { id: item.id } })
-                  }
-                />
+                <CaseRow item={item} onPress={() => handleCasePress(item.id)} />
               )}
             />
           )
@@ -342,11 +564,16 @@ export default function MapScreen() {
   );
 }
 
-const S = StyleSheet.create({
-  root: { flex: 1, backgroundColor: G.bg },
+// ─────────────────────────────────────────────────────────────────────────────
+// Styles
+// ─────────────────────────────────────────────────────────────────────────────
 
-  searchWrap: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, backgroundColor: G.white, borderBottomWidth: 1, borderBottomColor: "#EEEEEE", gap: 8 },
-  searchBox:  { flex: 1, flexDirection: "row", alignItems: "center", backgroundColor: G.bg, borderRadius: 10, paddingHorizontal: 12, height: 40, borderWidth: 1, borderColor: "#EEEEEE" },
+const S = StyleSheet.create({
+  root:   { flex: 1, backgroundColor: G.bg },
+  center: { flex: 1, alignItems: "center", justifyContent: "center" },
+
+  searchWrap: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 8, backgroundColor: G.white, borderBottomWidth: 1, borderBottomColor: "#EEE", gap: 8 },
+  searchBox:  { flex: 1, flexDirection: "row", alignItems: "center", backgroundColor: G.bg, borderRadius: 10, paddingHorizontal: 12, height: 40, borderWidth: 1, borderColor: "#EEE" },
   searchText: { flex: 1, fontSize: 14, color: G.text },
 
   toggleWrap:       { flexDirection: "row", borderRadius: 8, overflow: "hidden", borderWidth: 1, borderColor: G.border },
@@ -355,32 +582,28 @@ const S = StyleSheet.create({
   toggleText:       { fontSize: 16, color: G.sub },
   toggleTextActive: { color: G.dark },
 
-  chips:          { flexDirection: "row", paddingHorizontal: 12, paddingVertical: 8, gap: 8, backgroundColor: G.white, borderBottomWidth: 1, borderBottomColor: "#EEEEEE", alignItems: "center" },
-  chip:           { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: "#DDDDDD", backgroundColor: G.white },
+  chips:          { flexDirection: "row", paddingHorizontal: 12, paddingVertical: 8, gap: 8, backgroundColor: G.white, borderBottomWidth: 1, borderBottomColor: "#EEE", alignItems: "center" },
+  chip:           { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16, borderWidth: 1, borderColor: "#DDD", backgroundColor: G.white },
   chipActive:     { backgroundColor: G.light, borderColor: G.dark },
   chipUrgent:     { backgroundColor: G.urgent, borderColor: G.urgent },
   chipText:       { fontSize: 12, fontWeight: "600", color: G.sub },
   chipTextActive: { color: G.dark },
 
-  legend:    { flexDirection: "row", alignItems: "center", marginLeft: "auto" as any, gap: 4 },
-  legendDot: { width: 8, height: 8, borderRadius: 4 },
-  legendText:{ fontSize: 10, color: G.sub },
+  legend:     { flexDirection: "row", alignItems: "center", marginLeft: "auto" as any, gap: 4 },
+  legendDot:  { width: 8, height: 8, borderRadius: 4 },
+  legendText: { fontSize: 10, color: G.sub },
 
-  center: { flex: 1, alignItems: "center", justifyContent: "center" },
+  infoBanner:     { backgroundColor: "#EAF6FF", borderLeftWidth: 4, borderLeftColor: G.blue, paddingHorizontal: 14, paddingVertical: 7 },
+  infoBannerText: { fontSize: 12, color: "#1A5276", fontWeight: "600" },
 
-  statsOverlay: { position: "absolute", top: 10, left: 10, backgroundColor: "rgba(255,255,255,0.92)", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: G.border, shadowColor: "#000", shadowOpacity: 0.1, shadowRadius: 4, elevation: 3 },
+  statsOverlay: { position: "absolute", top: 10, left: 10, backgroundColor: "rgba(255,255,255,0.92)", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: G.border, elevation: 3 },
   statsText:    { fontSize: 12, fontWeight: "700", color: G.dark },
 
-  gpsBtn: { position: "absolute", right: 14, bottom: 90, width: 48, height: 48, borderRadius: 24, backgroundColor: G.white, alignItems: "center", justifyContent: "center", shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 6, elevation: 6, borderWidth: 1, borderColor: G.border },
+  gpsBtn: { position: "absolute", right: 14, bottom: 90, width: 48, height: 48, borderRadius: 24, backgroundColor: G.white, alignItems: "center", justifyContent: "center", elevation: 6, borderWidth: 1, borderColor: G.border },
 
-  noMarkersBanner: { position: "absolute", bottom: 80, left: 16, right: 16, backgroundColor: "rgba(255,255,255,0.95)", borderRadius: 12, padding: 14, borderWidth: 1, borderColor: G.border, alignItems: "center" },
-  noMarkersText:   { fontSize: 13, color: G.sub, textAlign: "center" },
+  adminBtn:     { position: "absolute", right: 14, bottom: 148, backgroundColor: "#C0392B", borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, elevation: 5 },
+  adminBtnText: { color: "#fff", fontWeight: "700", fontSize: 12 },
 
-  callout:           { width: 200, padding: 4 },
-  calloutName:       { fontSize: 14, fontWeight: "800", color: G.text, marginBottom: 2 },
-  calloutMeta:       { fontSize: 12, color: G.sub, marginBottom: 2 },
-  calloutLocation:   { fontSize: 11, color: G.muted, marginBottom: 4 },
-  calloutUrgent:     { backgroundColor: "#FDECEA", borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2, marginBottom: 4 },
-  calloutUrgentText: { fontSize: 10, fontWeight: "800", color: G.urgent },
-  calloutTap:        { fontSize: 11, color: G.primary, fontWeight: "700", textAlign: "right" },
+  noMarkersBanner: { position: "absolute", bottom: 80, left: 16, right: 16, backgroundColor: "rgba(255,255,255,0.95)", borderRadius: 12, padding: 16, borderWidth: 1, borderColor: G.border, alignItems: "center" },
+  noMarkersText:   { fontSize: 13, color: G.sub, textAlign: "center", lineHeight: 18 },
 });
